@@ -6,8 +6,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use storage_exchange_format::{
-    ExchangeError, StorageOperation, StorageOutcome, StorageRequest, StorageResponse,
-    decode, encode,
+    ExchangeError, StorageOperation, StorageOutcome, StorageRequest, StorageResponse, decode,
+    encode,
 };
 use tempfile::tempdir;
 use tungstenite::stream::MaybeTlsStream;
@@ -54,8 +54,7 @@ impl StorageProcess {
                     return Self { child, socket };
                 }
                 Err(error) => {
-                    if let Some(status) =
-                        child.try_wait().expect("Impossible de vérifier Storage")
+                    if let Some(status) = child.try_wait().expect("Impossible de vérifier Storage")
                     {
                         panic!("Storage s'est arrêté : {status}");
                     }
@@ -130,8 +129,7 @@ impl Drop for StorageProcess {
 #[test]
 fn only_one_of_ten_updates_with_the_same_revision_can_succeed() {
     let directory = tempdir().unwrap();
-    let mut storage =
-        StorageProcess::start(&directory.path().join("data.sqlite3"));
+    let mut storage = StorageProcess::start(&directory.path().join("data.sqlite3"));
 
     assert_eq!(
         storage.request(
@@ -161,17 +159,12 @@ fn only_one_of_ten_updates_with_the_same_revision_can_succeed() {
 
     let updated = responses
         .values()
-        .filter(|outcome| {
-            **outcome == StorageOutcome::Updated { revision: 2 }
-        })
+        .filter(|outcome| **outcome == StorageOutcome::Updated { revision: 2 })
         .count();
 
     let conflicts = responses
         .values()
-        .filter(|outcome| {
-            **outcome
-                == StorageOutcome::Error(ExchangeError::RevisionConflict)
-        })
+        .filter(|outcome| **outcome == StorageOutcome::Error(ExchangeError::RevisionConflict))
         .count();
 
     assert_eq!(updated, 1);

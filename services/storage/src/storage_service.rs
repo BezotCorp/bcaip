@@ -1,28 +1,33 @@
 use std::collections::{HashMap, VecDeque};
+use std::mem::size_of;
 
 use crate::data_record::DataRecord;
 use crate::storage_engine::{StorageEngine, StorageResult};
 
-const DEFAULT_CACHE_CAPACITY: usize = 1_024;
+type CacheKey = (String, String);
 
 pub struct StorageService<E: StorageEngine> {
     engine: E,
-    records: HashMap<(String, String), Option<DataRecord>>,
-    cache_order: VecDeque<(String, String)>,
+    records: HashMap<CacheKey, Option<DataRecord>>,
+    cache_order: VecDeque<CacheKey>,
     cache_capacity: usize,
+    cache_max_bytes: usize,
+    cache_bytes: usize,
 }
 
 impl<E: StorageEngine> StorageService<E> {
-    pub fn new(engine: E) -> Self {
-        Self::with_cache_capacity(engine, DEFAULT_CACHE_CAPACITY)
+    pub fn with_cache_capacity(engine: E, cache_capacity: usize) -> Self {
+        Self::with_cache_limits(engine, cache_capacity, usize::MAX)
     }
 
-    pub fn with_cache_capacity(engine: E, cache_capacity: usize) -> Self {
+    pub fn with_cache_limits(engine: E, cache_capacity: usize, cache_max_bytes: usize) -> Self {
         Self {
             engine,
             records: HashMap::new(),
             cache_order: VecDeque::new(),
             cache_capacity,
+            cache_max_bytes,
+            cache_bytes: 0,
         }
     }
 
@@ -49,10 +54,7 @@ impl<E: StorageEngine> StorageService<E> {
     ) -> StorageResult<DataRecord> {
         let record = self.engine.write(namespace, key, content, None)?;
 
-        self.cache(
-            (namespace.to_owned(), key.to_owned()),
-            Some(record.clone()),
-        );
+        self.cache((namespace.to_owned(), key.to_owned()), Some(record.clone()));
 
         Ok(record)
     }
@@ -64,66 +66,86 @@ impl<E: StorageEngine> StorageService<E> {
         content: &[u8],
         revision: i64,
     ) -> StorageResult<DataRecord> {
-        let record = self
-            .engine
-            .write(namespace, key, content, Some(revision))?;
+        let record = self.engine.write(namespace, key, content, Some(revision))?;
 
-        self.cache(
-            (namespace.to_owned(), key.to_owned()),
-            Some(record.clone()),
-        );
+        self.cache((namespace.to_owned(), key.to_owned()), Some(record.clone()));
 
         Ok(record)
     }
 
-    pub fn delete(
-        &mut self,
-        namespace: &str,
-        key: &str,
-        revision: i64,
-    ) -> StorageResult<bool> {
+    pub fn delete(&mut self, namespace: &str, key: &str, revision: i64) -> StorageResult<bool> {
         let deleted = self.engine.delete(namespace, key, revision)?;
 
         if deleted {
-            self.cache(
-                (namespace.to_owned(), key.to_owned()),
-                None,
-            );
+            self.cache((namespace.to_owned(), key.to_owned()), None);
         }
 
         Ok(deleted)
     }
 
-    fn cache(
-        &mut self,
-        key: (String, String),
-        record: Option<DataRecord>,
-    ) {
-        if self.cache_capacity == 0 {
+    fn cache(&mut self, key: CacheKey, record: Option<DataRecord>) {
+        self.remove_cached(&key);
+
+        if self.cache_capacity == 0 || self.cache_max_bytes == 0 {
             return;
         }
 
-        self.records.insert(key.clone(), record);
-        self.touch(&key);
+        let weight = Self::cache_weight(&key, &record);
 
-        while self.records.len() > self.cache_capacity {
+        if weight > self.cache_max_bytes {
+            return;
+        }
+
+        self.cache_bytes += weight;
+        self.records.insert(key.clone(), record);
+        self.cache_order.push_back(key);
+
+        self.evict_to_limits();
+    }
+
+    fn touch(&mut self, key: &CacheKey) {
+        if let Some(position) = self.cache_order.iter().position(|existing| existing == key) {
+            self.cache_order.remove(position);
+            self.cache_order.push_back(key.clone());
+        }
+    }
+
+    fn remove_cached(&mut self, key: &CacheKey) {
+        if let Some(record) = self.records.remove(key) {
+            self.cache_bytes = self
+                .cache_bytes
+                .saturating_sub(Self::cache_weight(key, &record));
+        }
+
+        if let Some(position) = self.cache_order.iter().position(|existing| existing == key) {
+            self.cache_order.remove(position);
+        }
+    }
+
+    fn evict_to_limits(&mut self) {
+        while self.records.len() > self.cache_capacity || self.cache_bytes > self.cache_max_bytes {
             let Some(oldest) = self.cache_order.pop_front() else {
                 break;
             };
 
-            self.records.remove(&oldest);
+            if let Some(record) = self.records.remove(&oldest) {
+                self.cache_bytes = self
+                    .cache_bytes
+                    .saturating_sub(Self::cache_weight(&oldest, &record));
+            }
         }
     }
 
-    fn touch(&mut self, key: &(String, String)) {
-        if let Some(position) = self
-            .cache_order
-            .iter()
-            .position(|existing| existing == key)
-        {
-            self.cache_order.remove(position);
-        }
+    fn cache_weight(key: &CacheKey, record: &Option<DataRecord>) -> usize {
+        let key_weight = key.0.len().saturating_add(key.1.len());
 
-        self.cache_order.push_back(key.clone());
+        match record {
+            Some(record) => key_weight
+                .saturating_add(record.namespace.len())
+                .saturating_add(record.key.len())
+                .saturating_add(record.content.len())
+                .saturating_add(size_of::<i64>()),
+            None => key_weight,
+        }
     }
 }

@@ -34,9 +34,7 @@ fn connect_storage(
                 return socket;
             }
             Err(error) => {
-                if let Some(status) =
-                    child.try_wait().expect("Impossible de vérifier Storage")
-                {
+                if let Some(status) = child.try_wait().expect("Impossible de vérifier Storage") {
                     panic!("Storage s'est arrêté : {status}");
                 }
 
@@ -62,17 +60,14 @@ fn request(
         .send(Message::Binary(bytes.into()))
         .expect("Storage doit accepter la demande");
 
-    let message = socket
-        .read()
-        .expect("Storage doit renvoyer une réponse");
+    let message = socket.read().expect("Storage doit renvoyer une réponse");
 
     let bytes = match message {
         Message::Binary(bytes) => bytes,
         other => panic!("Réponse non binaire : {other:?}"),
     };
 
-    let response: StorageResponse =
-        decode(&bytes).expect("Réponse BinCodeNext invalide");
+    let response: StorageResponse = decode(&bytes).expect("Réponse BinCodeNext invalide");
 
     assert_eq!(response.id, id);
 
@@ -84,8 +79,7 @@ fn storage_accepts_a_new_connection_after_client_disconnect() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("data.sqlite3");
 
-    let listener =
-        TcpListener::bind("127.0.0.1:0").expect("Impossible de réserver un port");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Impossible de réserver un port");
 
     let address = listener.local_addr().expect("Adresse indisponible");
     drop(listener);

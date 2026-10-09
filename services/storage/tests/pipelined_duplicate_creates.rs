@@ -6,8 +6,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use storage_exchange_format::{
-    ExchangeError, StorageOperation, StorageOutcome, StorageRequest, StorageResponse,
-    decode, encode,
+    ExchangeError, StorageOperation, StorageOutcome, StorageRequest, StorageResponse, decode,
+    encode,
 };
 use tempfile::tempdir;
 use tungstenite::stream::MaybeTlsStream;
@@ -54,8 +54,7 @@ impl StorageProcess {
                     return Self { child, socket };
                 }
                 Err(error) => {
-                    if let Some(status) =
-                        child.try_wait().expect("Impossible de vérifier Storage")
+                    if let Some(status) = child.try_wait().expect("Impossible de vérifier Storage")
                     {
                         panic!("Storage s'est arrêté : {status}");
                     }
@@ -130,8 +129,7 @@ impl Drop for StorageProcess {
 #[test]
 fn ten_in_flight_creations_of_one_identifier_do_not_overwrite_each_other() {
     let directory = tempdir().unwrap();
-    let mut storage =
-        StorageProcess::start(&directory.path().join("data.sqlite3"));
+    let mut storage = StorageProcess::start(&directory.path().join("data.sqlite3"));
 
     for id in 1..=10 {
         storage.send(
