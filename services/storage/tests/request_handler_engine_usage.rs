@@ -28,6 +28,8 @@ struct CountingEngine {
     reads: usize,
     writes: usize,
     deletes: usize,
+    write_failures_remaining: usize,
+    delete_failures_remaining: usize,
 }
 
 impl CountingEngine {
@@ -75,6 +77,11 @@ impl StorageEngine for SharedCountingEngine {
         let mut state = self.state.borrow_mut();
         state.writes += 1;
 
+        if state.write_failures_remaining > 0 {
+            state.write_failures_remaining -= 1;
+            return Err("Injected write failure".into());
+        }
+
         let map_key = (namespace.to_owned(), key.to_owned());
 
         let revision = match expected_revision {
@@ -118,6 +125,11 @@ impl StorageEngine for SharedCountingEngine {
     ) -> StorageResult<bool> {
         let mut state = self.state.borrow_mut();
         state.deletes += 1;
+
+        if state.delete_failures_remaining > 0 {
+            state.delete_failures_remaining -= 1;
+            return Err("Injected delete failure".into());
+        }
 
         let map_key = (namespace.to_owned(), key.to_owned());
 
@@ -245,6 +257,33 @@ fn cold_duplicate_create_uses_one_write_then_one_read_to_classify_failure() {
 }
 
 #[test]
+fn create_engine_failure_is_storage_failure() {
+    let (mut storage, engine) = service();
+
+    engine.borrow_mut().write_failures_remaining = 1;
+
+    assert_eq!(
+        handle_request(
+            &mut storage,
+            request(
+                1,
+                StorageOperation::Create {
+                    namespace: "records".into(),
+                    key: "item".into(),
+                    content: vec![1],
+                },
+            ),
+        )
+        .outcome,
+        StorageOutcome::Error(ExchangeError::StorageFailure),
+    );
+
+    let engine = engine.borrow();
+    assert_eq!(engine.writes, 1);
+    assert_eq!(engine.reads, 1);
+}
+
+#[test]
 fn successful_cold_update_uses_one_engine_write_and_no_read() {
     let (mut storage, engine) = service();
 
@@ -319,6 +358,35 @@ fn missing_cold_update_reads_only_after_failed_write() {
         )
         .outcome,
         StorageOutcome::Error(ExchangeError::NotFound),
+    );
+
+    let engine = engine.borrow();
+    assert_eq!(engine.writes, 1);
+    assert_eq!(engine.reads, 1);
+}
+
+#[test]
+fn update_engine_failure_is_storage_failure() {
+    let (mut storage, engine) = service();
+
+    engine.borrow_mut().insert("records", "item", vec![1], 1);
+    engine.borrow_mut().write_failures_remaining = 1;
+
+    assert_eq!(
+        handle_request(
+            &mut storage,
+            request(
+                1,
+                StorageOperation::Update {
+                    namespace: "records".into(),
+                    key: "item".into(),
+                    content: vec![2],
+                    expected_revision: 1,
+                },
+            ),
+        )
+        .outcome,
+        StorageOutcome::Error(ExchangeError::StorageFailure),
     );
 
     let engine = engine.borrow();
@@ -445,6 +513,34 @@ fn missing_cold_delete_reads_only_after_failed_delete() {
     let engine = engine.borrow();
     assert_eq!(engine.deletes, 1);
     assert_eq!(engine.reads, 1);
+}
+
+#[test]
+fn delete_engine_failure_is_storage_failure() {
+    let (mut storage, engine) = service();
+
+    engine.borrow_mut().insert("records", "item", vec![1], 1);
+    engine.borrow_mut().delete_failures_remaining = 1;
+
+    assert_eq!(
+        handle_request(
+            &mut storage,
+            request(
+                1,
+                StorageOperation::Delete {
+                    namespace: "records".into(),
+                    key: "item".into(),
+                    expected_revision: 1,
+                },
+            ),
+        )
+        .outcome,
+        StorageOutcome::Error(ExchangeError::StorageFailure),
+    );
+
+    let engine = engine.borrow();
+    assert_eq!(engine.deletes, 1);
+    assert_eq!(engine.reads, 0);
 }
 
 #[test]
