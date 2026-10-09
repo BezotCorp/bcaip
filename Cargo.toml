@@ -6,6 +6,7 @@ members = [
     "products/vscode_extension",
     "services/hub",
     "services/storage",
+    "services/launcher",
     "libraries/app_engine_exchange_format",
     "libraries/app_ui_exchange_format",
     "libraries/vscode_extension_exchange_format",
