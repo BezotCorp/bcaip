@@ -31,14 +31,25 @@ impl<E: StorageEngine> StorageService<E> {
         }
     }
 
-    pub fn read(&mut self, namespace: &str, key: &str) -> StorageResult<Option<DataRecord>> {
+    pub fn cached_state(&mut self, namespace: &str, key: &str) -> Option<Option<DataRecord>> {
         let cache_key = (namespace.to_owned(), key.to_owned());
+        let record = self.records.get(&cache_key).cloned()?;
 
-        if let Some(record) = self.records.get(&cache_key).cloned() {
-            self.touch(&cache_key);
+        self.touch(&cache_key);
+
+        Some(record)
+    }
+
+    pub fn read(&mut self, namespace: &str, key: &str) -> StorageResult<Option<DataRecord>> {
+        if let Some(record) = self.cached_state(namespace, key) {
             return Ok(record);
         }
 
+        self.refresh(namespace, key)
+    }
+
+    pub fn refresh(&mut self, namespace: &str, key: &str) -> StorageResult<Option<DataRecord>> {
+        let cache_key = (namespace.to_owned(), key.to_owned());
         let record = self.engine.read(namespace, key)?;
 
         self.cache(cache_key, record.clone());
