@@ -23,6 +23,10 @@ name = "hub"
 version = "0.1.0"
 
 [[package]]
+name = "launcher"
+version = "0.1.0"
+
+[[package]]
 name = "storage"
 version = "0.1.0"
 
