@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+storage_exchange_format = { path = "../../libraries/storage_exchange_format" }
+tungstenite = "0.28"
+[dev-dependencies]
+tungstenite = "0.28"
+tempfile = "3"
