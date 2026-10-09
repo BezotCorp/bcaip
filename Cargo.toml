@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = [
+    "products/app_engine",
+    "products/app_ui",
+    "products/vscode_extension",
+    "services/hub",
+    "services/storage",
+    "libraries/app_engine_exchange_format",
+    "libraries/app_ui_exchange_format",
+    "libraries/vscode_extension_exchange_format",
+    "libraries/storage_exchange_format",
+]
