@@ -32,20 +32,21 @@ fn execute<E: StorageEngine>(
             validate(&namespace, &key)?;
 
             if storage
-                .read(&namespace, &key)
-                .map_err(|_| ExchangeError::StorageFailure)?
-                .is_some()
+                .cached_state(&namespace, &key)
+                .is_some_and(|record| record.is_some())
             {
                 return Err(ExchangeError::AlreadyExists);
             }
 
-            let record = storage
-                .create(&namespace, &key, &content)
-                .map_err(|_| ExchangeError::StorageFailure)?;
-
-            Ok(StorageOutcome::Created {
-                revision: record.revision,
-            })
+            match storage.create(&namespace, &key, &content) {
+                Ok(record) => Ok(StorageOutcome::Created {
+                    revision: record.revision,
+                }),
+                Err(_) => match storage.refresh(&namespace, &key) {
+                    Ok(Some(_)) => Err(ExchangeError::AlreadyExists),
+                    Ok(None) | Err(_) => Err(ExchangeError::StorageFailure),
+                },
+            }
         }
 
         StorageOperation::Read { namespace, key } => {
@@ -74,22 +75,26 @@ fn execute<E: StorageEngine>(
                 return Err(ExchangeError::InvalidRequest);
             }
 
-            let current = storage
-                .read(&namespace, &key)
-                .map_err(|_| ExchangeError::StorageFailure)?
-                .ok_or(ExchangeError::NotFound)?;
+            if let Some(current) = storage.cached_state(&namespace, &key) {
+                let current = current.ok_or(ExchangeError::NotFound)?;
 
-            if current.revision != expected_revision {
-                return Err(ExchangeError::RevisionConflict);
+                if current.revision != expected_revision {
+                    return Err(ExchangeError::RevisionConflict);
+                }
             }
 
-            let record = storage
-                .update(&namespace, &key, &content, expected_revision)
-                .map_err(|_| ExchangeError::RevisionConflict)?;
-
-            Ok(StorageOutcome::Updated {
-                revision: record.revision,
-            })
+            match storage.update(&namespace, &key, &content, expected_revision) {
+                Ok(record) => Ok(StorageOutcome::Updated {
+                    revision: record.revision,
+                }),
+                Err(_) => match storage.refresh(&namespace, &key) {
+                    Ok(None) => Err(ExchangeError::NotFound),
+                    Ok(Some(current)) if current.revision != expected_revision => {
+                        Err(ExchangeError::RevisionConflict)
+                    }
+                    Ok(Some(_)) | Err(_) => Err(ExchangeError::StorageFailure),
+                },
+            }
         }
 
         StorageOperation::Delete {
@@ -103,23 +108,25 @@ fn execute<E: StorageEngine>(
                 return Err(ExchangeError::InvalidRequest);
             }
 
-            let current = storage
-                .read(&namespace, &key)
-                .map_err(|_| ExchangeError::StorageFailure)?
-                .ok_or(ExchangeError::NotFound)?;
+            if let Some(current) = storage.cached_state(&namespace, &key) {
+                let current = current.ok_or(ExchangeError::NotFound)?;
 
-            if current.revision != expected_revision {
-                return Err(ExchangeError::RevisionConflict);
+                if current.revision != expected_revision {
+                    return Err(ExchangeError::RevisionConflict);
+                }
             }
 
-            if !storage
-                .delete(&namespace, &key, expected_revision)
-                .map_err(|_| ExchangeError::StorageFailure)?
-            {
-                return Err(ExchangeError::RevisionConflict);
+            match storage.delete(&namespace, &key, expected_revision) {
+                Ok(true) => Ok(StorageOutcome::Deleted),
+                Ok(false) => match storage.refresh(&namespace, &key) {
+                    Ok(None) => Err(ExchangeError::NotFound),
+                    Ok(Some(current)) if current.revision != expected_revision => {
+                        Err(ExchangeError::RevisionConflict)
+                    }
+                    Ok(Some(_)) | Err(_) => Err(ExchangeError::StorageFailure),
+                },
+                Err(_) => Err(ExchangeError::StorageFailure),
             }
-
-            Ok(StorageOutcome::Deleted)
         }
     }
 }
