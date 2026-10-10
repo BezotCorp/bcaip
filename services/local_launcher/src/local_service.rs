@@ -1,5 +1,6 @@
 use crate::health_check::HealthCheck;
 use crate::service_config::ServiceConfig;
+use crate::watcher_update_record::WatcherUpdateRecord;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -18,6 +19,7 @@ pub(crate) struct LocalService {
     service: ServiceConfig,
     server_root: PathBuf,
     executable_path: PathBuf,
+    watcher_state_directory: PathBuf,
 }
 
 impl LocalService {
@@ -25,24 +27,50 @@ impl LocalService {
         service: ServiceConfig,
         server_root: PathBuf,
         executable_path: PathBuf,
+        watcher_state_directory: PathBuf,
     ) -> Self {
         Self {
             service,
             server_root,
             executable_path,
+            watcher_state_directory,
         }
     }
 
-    pub(crate) fn monitor(&self, stop: &AtomicBool) {
-        let mut failures_in_row = 0u32;
+    pub(crate) fn monitor(
+        &self,
+        stop: &AtomicBool,
+    ) -> Result<(), String> {
+        let mut failures_in_row = 0_u32;
+        let mut observed_update_id: Option<String> = None;
 
         while !stop.load(Ordering::SeqCst) {
+            match WatcherUpdateRecord::committed_update_id(
+                &self.watcher_state_directory,
+                &self.service.name,
+            ) {
+                Ok(Some(update_id)) => {
+                    observed_update_id = Some(update_id);
+                }
+
+                Ok(None) => {}
+
+                Err(error) => {
+                    eprintln!(
+                        "[LocalLauncher] failed to read watcher state for {} before spawn: {}",
+                        self.service.name,
+                        error
+                    );
+                }
+            }
+
             if !self.executable_path.is_file() {
                 eprintln!(
                     "[LocalLauncher] executable not found for {}: {}",
                     self.service.name,
                     self.executable_path.display()
                 );
+
                 failures_in_row = failures_in_row.saturating_add(1);
                 sleep_interruptible(stop, restart_delay(failures_in_row));
                 continue;
@@ -54,11 +82,13 @@ impl LocalService {
                 .spawn()
             {
                 Ok(child) => child,
+
                 Err(error) => {
                     eprintln!(
                         "[LocalLauncher] failed to start {}: {error}",
                         self.service.name
                     );
+
                     failures_in_row = failures_in_row.saturating_add(1);
                     sleep_interruptible(stop, restart_delay(failures_in_row));
                     continue;
@@ -73,27 +103,67 @@ impl LocalService {
 
             let started = Instant::now();
             let mut healthy = false;
-            let mut probe_failures = 0;
+            let mut probe_failures = 0_u32;
+            let mut restart_due_to_update = false;
 
             while !stop.load(Ordering::SeqCst) {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        eprintln!("[LocalLauncher] {} exited: {}", self.service.name, status);
+                        eprintln!(
+                            "[LocalLauncher] {} exited: {}",
+                            self.service.name,
+                            status
+                        );
+
                         break;
                     }
+
                     Ok(None) => {}
+
                     Err(error) => {
+                        return Err(format!(
+                            "lost process authority for {} while querying its state: {error}",
+                            self.service.name
+                        ));
+                    }
+                }
+
+                match WatcherUpdateRecord::committed_update_id(
+                    &self.watcher_state_directory,
+                    &self.service.name,
+                ) {
+                    Ok(Some(update_id))
+                        if observed_update_id.as_deref()
+                            != Some(update_id.as_str()) =>
+                    {
                         eprintln!(
-                            "[LocalLauncher] failed to query {} process state: {error}",
+                            "[LocalLauncher] committed update {} detected for {}; restarting",
+                            update_id,
                             self.service.name
                         );
+
+                        observed_update_id = Some(update_id);
+                        restart_due_to_update = true;
                         break;
+                    }
+
+                    Ok(_) => {}
+
+                    Err(error) => {
+                        eprintln!(
+                            "[LocalLauncher] failed to read watcher state for {}: {}",
+                            self.service.name,
+                            error
+                        );
                     }
                 }
 
                 if self.service.health_check.is_healthy() {
                     if !healthy {
-                        eprintln!("[LocalLauncher] {} is ready", self.service.name);
+                        eprintln!(
+                            "[LocalLauncher] {} is ready",
+                            self.service.name
+                        );
                     }
 
                     healthy = true;
@@ -103,11 +173,17 @@ impl LocalService {
 
                     eprintln!(
                         "[LocalLauncher] {} health failure {}/{}",
-                        self.service.name, probe_failures, MAX_FAILURES
+                        self.service.name,
+                        probe_failures,
+                        MAX_FAILURES
                     );
 
                     if probe_failures >= MAX_FAILURES {
-                        eprintln!("[LocalLauncher] {} unhealthy; restarting", self.service.name);
+                        eprintln!(
+                            "[LocalLauncher] {} unhealthy; restarting",
+                            self.service.name
+                        );
+
                         break;
                     }
                 } else if started.elapsed() >= STARTUP_TIMEOUT {
@@ -115,21 +191,27 @@ impl LocalService {
                         "[LocalLauncher] {} startup timeout; restarting",
                         self.service.name
                     );
+
                     break;
                 }
 
                 sleep_interruptible(stop, PROBE_INTERVAL);
             }
 
-            if let Err(error) = terminate_child(&mut child) {
-                eprintln!(
-                    "[LocalLauncher] failed to terminate {}: {error}",
+            terminate_child(&mut child).map_err(|error| {
+                format!(
+                    "failed to terminate {}; refusing to launch another instance: {error}",
                     self.service.name
-                );
-            }
+                )
+            })?;
 
             if stop.load(Ordering::SeqCst) {
                 break;
+            }
+
+            if restart_due_to_update {
+                failures_in_row = 0;
+                continue;
             }
 
             if started.elapsed() >= Duration::from_secs(60) {
@@ -147,6 +229,8 @@ impl LocalService {
 
             sleep_interruptible(stop, delay);
         }
+
+        Ok(())
     }
 }
 
@@ -195,10 +279,15 @@ fn ws_ping(address: SocketAddr) -> bool {
 }
 
 fn restart_delay(failures_in_row: u32) -> Duration {
-    Duration::from_secs((2_u64.saturating_pow(failures_in_row.min(5))).min(30))
+    Duration::from_secs(
+        (2_u64.saturating_pow(failures_in_row.min(5))).min(30)
+    )
 }
 
-fn sleep_interruptible(stop: &AtomicBool, duration: Duration) {
+fn sleep_interruptible(
+    stop: &AtomicBool,
+    duration: Duration,
+) {
     let end = Instant::now() + duration;
 
     while !stop.load(Ordering::SeqCst) && Instant::now() < end {
@@ -216,5 +305,6 @@ fn terminate_child(child: &mut Child) -> io::Result<()> {
 
     child.kill()?;
     child.wait()?;
+
     Ok(())
 }

@@ -7,7 +7,7 @@ members = [
     "services/hub",
     "services/storage",
     "services/local_launcher",
-    "services/global_launcher",
+    "services/watcher",
     "libraries/app_engine_exchange_format",
     "libraries/app_ui_exchange_format",
     "libraries/vscode_extension_exchange_format",

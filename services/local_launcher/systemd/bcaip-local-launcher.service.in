@@ -1,0 +1,23 @@
+[Unit]
+Description=BCAIP Local Launcher
+After=network-online.target bcaip-watcher.service
+Wants=network-online.target bcaip-watcher.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=@LOCAL_LAUNCHER_EXECUTABLE@
+Environment="BCAIP_LOCAL_LAUNCHER_CONFIG_DIR=@LOCAL_LAUNCHER_CONFIG_DIR@"
+Environment="BCAIP_WATCHER_STATE_DIR=@WATCHER_STATE_DIR@"
+Environment="BCAIP_LOCAL_LAUNCHER_UPDATE_PRODUCT=local_launcher"
+
+Restart=always
+RestartSec=2
+
+KillMode=control-group
+TimeoutStopSec=30
+
+
+[Install]
+WantedBy=multi-user.target

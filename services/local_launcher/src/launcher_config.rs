@@ -5,7 +5,7 @@ use crate::service_config::ServiceConfig;
 use bincode_next::{Decode, Encode};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Encode, Decode, Deserialize, Clone, Debug)]
 pub(crate) struct LauncherConfig {
@@ -19,7 +19,10 @@ impl LauncherConfig {
         ServiceConfig::validate_all(&self.services, &servers)
     }
 
-    pub(crate) fn local_services(&self) -> Result<Vec<LocalService>, String> {
+    pub(crate) fn local_services(
+        &self,
+        watcher_state_directory: &Path,
+    ) -> Result<Vec<LocalService>, String> {
         self.validate()?;
 
         let servers = self.server_index()?;
@@ -34,7 +37,12 @@ impl LauncherConfig {
             let executable = server.location.executable_path(relative_executable);
             let root = server.location.root_path().to_path_buf();
 
-            local_services.push(LocalService::new(service.clone(), root, executable));
+            local_services.push(LocalService::new(
+                service.clone(),
+                root,
+                executable,
+                PathBuf::from(watcher_state_directory),
+            ));
         }
 
         Ok(local_services)
