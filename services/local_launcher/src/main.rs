@@ -1,5 +1,3 @@
-mod auth_ref;
-mod dns_name;
 mod extension;
 mod file;
 mod files;
@@ -9,11 +7,8 @@ mod launcher_cache;
 mod launcher_config;
 mod local_service;
 mod server_config;
-mod server_host;
 mod server_id;
 mod server_location;
-mod server_port;
-mod server_protocol;
 mod service_config;
 
 use files::Files;

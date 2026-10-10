@@ -209,6 +209,12 @@ dependencies = [
 [[package]]
 name = "global_launcher"
 version = "0.1.0"
+dependencies = [
+ "bincode-next",
+ "ron",
+ "serde",
+ "uuid",
+]
 
 [[package]]
 name = "http"

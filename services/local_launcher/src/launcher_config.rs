@@ -30,23 +30,9 @@ impl LauncherConfig {
                 .get(&service.server_id)
                 .ok_or_else(|| format!("unknown server: {}", service.server_id))?;
 
-            if server.location.is_remote() {
-                return Err(format!(
-                    "remote supervision is not implemented for service {} in server {}",
-                    service.name, service.server_id
-                ));
-            }
-
             let relative_executable = Path::new(&service.executable_path);
-            let executable = server
-                .location
-                .local_executable_path(relative_executable)
-                .ok_or_else(|| format!("server {} is not local", server.id))?;
-            let root = server
-                .location
-                .local_root_path()
-                .ok_or_else(|| format!("server {} is not local", server.id))?
-                .to_path_buf();
+            let executable = server.location.executable_path(relative_executable);
+            let root = server.location.root_path().to_path_buf();
 
             local_services.push(LocalService::new(service.clone(), root, executable));
         }

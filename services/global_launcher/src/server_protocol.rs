@@ -8,3 +8,11 @@ pub(crate) enum ServerProtocol {
     Http,
     Https,
 }
+
+impl ServerProtocol {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Ws | Self::Wss | Self::Http | Self::Https => Ok(()),
+        }
+    }
+}
