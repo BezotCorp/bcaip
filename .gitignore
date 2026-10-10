@@ -1,1 +1,3 @@
-target
+target/
+*.local.*
+/services/local_launcher/launcher_config*_cache.bin
