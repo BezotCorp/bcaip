@@ -5,14 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(
-    Encode,
-    Decode,
-    Deserialize,
-    Serialize,
-    Clone,
-    Debug,
-)]
+#[derive(Encode, Decode, Deserialize, Serialize, Clone, Debug)]
 pub(crate) struct Executable {
     pub(crate) name: String,
     pub(crate) working_directory: String,
@@ -29,41 +22,26 @@ pub(crate) struct Executable {
 impl Executable {
     pub(crate) fn validate_definition(&self) -> Result<(), String> {
         if self.name.is_empty()
-            || !self.name.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || byte == b'_'
-                    || byte == b'-'
-            })
+            || !self
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
         {
-            return Err(format!(
-                "invalid executable name: {}",
-                self.name
-            ));
+            return Err(format!("invalid executable name: {}", self.name));
         }
 
-        let working_directory = Path::new(
-            &self.working_directory
-        );
+        let working_directory = Path::new(&self.working_directory);
 
         if self.working_directory.trim().is_empty() {
-            return Err(format!(
-                "{} working_directory must not be empty",
-                self.name
-            ));
+            return Err(format!("{} working_directory must not be empty", self.name));
         }
 
         if !working_directory.is_absolute() {
-            return Err(format!(
-                "{} working_directory must be absolute",
-                self.name
-            ));
+            return Err(format!("{} working_directory must be absolute", self.name));
         }
 
         for component in working_directory.components() {
-            if matches!(
-                component,
-                Component::ParentDir | Component::CurDir
-            ) {
+            if matches!(component, Component::ParentDir | Component::CurDir) {
                 return Err(format!(
                     "{} working_directory must not contain relative segments",
                     self.name
@@ -71,15 +49,10 @@ impl Executable {
             }
         }
 
-        let executable_path = Path::new(
-            &self.executable_path
-        );
+        let executable_path = Path::new(&self.executable_path);
 
         if self.executable_path.trim().is_empty() {
-            return Err(format!(
-                "{} executable_path must not be empty",
-                self.name
-            ));
+            return Err(format!("{} executable_path must not be empty", self.name));
         }
 
         if executable_path.is_absolute() {
@@ -108,7 +81,6 @@ impl Executable {
     }
 
     pub(crate) fn path(&self) -> PathBuf {
-        Path::new(&self.working_directory)
-            .join(&self.executable_path)
+        Path::new(&self.working_directory).join(&self.executable_path)
     }
 }

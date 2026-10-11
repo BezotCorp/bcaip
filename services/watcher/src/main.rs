@@ -10,11 +10,11 @@ mod watcher_request;
 mod watcher_response;
 mod ws_health;
 
-use crate::executable_store::ExecutableStore;
-use crate::update_server::{handle_connection, reconcile_all};
 use crate::executable::Executable;
+use crate::executable_store::ExecutableStore;
 use crate::process::Process;
 use crate::update_phase::UpdatePhase;
+use crate::update_server::{handle_connection, reconcile_all};
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
@@ -42,17 +42,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let data_directory = data_directory()?;
 
-    let store = Arc::new(
-        ExecutableStore::load(&data_directory)?,
-    );
+    let store = Arc::new(ExecutableStore::load(&data_directory)?);
 
     reconcile_all(&store)?;
 
-    let launcher_name = env::var("BCAIP_LAUNCHER_NAME")
-        .unwrap_or_else(|_| DEFAULT_LAUNCHER_NAME.to_string());
+    let launcher_name =
+        env::var("BCAIP_LAUNCHER_NAME").unwrap_or_else(|_| DEFAULT_LAUNCHER_NAME.to_string());
 
-    let watcher_name = env::var("BCAIP_WATCHER_NAME")
-        .unwrap_or_else(|_| DEFAULT_WATCHER_NAME.to_string());
+    let watcher_name =
+        env::var("BCAIP_WATCHER_NAME").unwrap_or_else(|_| DEFAULT_WATCHER_NAME.to_string());
 
     let self_definition = store.get(&watcher_name)?;
 
@@ -68,18 +66,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let actual_address = listener.local_addr()?;
 
-    let instance_id = env::var("BCAIP_INSTANCE_ID")
-        .unwrap_or_else(|_| Uuid::now_v7().to_string());
+    let instance_id = env::var("BCAIP_INSTANCE_ID").unwrap_or_else(|_| Uuid::now_v7().to_string());
 
-    let self_applied_update_id = self_definition
-        .as_ref()
-        .and_then(committed_update_id);
+    let self_applied_update_id = self_definition.as_ref().and_then(committed_update_id);
 
     if self_definition.is_some() {
-        store.expect_process(
-            &watcher_name,
-            &instance_id,
-        )?;
+        store.expect_process(&watcher_name, &instance_id)?;
 
         store.set_process(
             &watcher_name,
@@ -87,8 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 pid: std::process::id(),
                 instance_id: instance_id.clone(),
                 ws_address: actual_address,
-                applied_update_id:
-                    self_applied_update_id.clone(),
+                applied_update_id: self_applied_update_id.clone(),
             },
         )?;
     }
@@ -104,20 +95,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let monitor_launcher_name = launcher_name.clone();
     let monitor_watcher_name = watcher_name.clone();
 
-    let monitor_watcher_address =
-        actual_address;
+    let monitor_watcher_address = actual_address;
 
     let monitor_handle = thread::spawn(move || {
-        if let Err(error) =
-            reconcile_runtime_processes(
-                &monitor_store,
-                &monitor_watcher_name,
-            )
-        {
-            println!(
-                "[Watcher] failed to reconcile runtime processes: {}",
-                error
-            );
+        if let Err(error) = reconcile_runtime_processes(&monitor_store, &monitor_watcher_name) {
+            println!("[Watcher] failed to reconcile runtime processes: {}", error);
         }
 
         monitor(
@@ -134,44 +116,30 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok((stream, peer)) => {
                 let connection_store = Arc::clone(&store);
 
-                let connection_watcher_name =
-                    watcher_name.clone();
+                let connection_watcher_name = watcher_name.clone();
 
-                let connection_instance_id =
-                    instance_id.clone();
+                let connection_instance_id = instance_id.clone();
 
-                let connection_applied_update_id =
-                    self_applied_update_id.clone();
+                let connection_applied_update_id = self_applied_update_id.clone();
 
                 thread::spawn(move || {
-                    let _ = stream.set_read_timeout(
-                        Some(Duration::from_secs(30)),
-                    );
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
 
-                    let _ = stream.set_write_timeout(
-                        Some(Duration::from_secs(30)),
-                    );
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
                     if let Err(error) = handle_connection(
                         stream,
                         &connection_store,
                         &connection_watcher_name,
                         &connection_instance_id,
-                        connection_applied_update_id
-                            .as_deref(),
+                        connection_applied_update_id.as_deref(),
                     ) {
-                        println!(
-                            "[Watcher] connection from {} failed: {}",
-                            peer,
-                            error
-                        );
+                        println!("[Watcher] connection from {} failed: {}", peer, error);
                     }
                 });
             }
 
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock =>
-            {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
             }
 
@@ -184,10 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _ = monitor_handle.join();
 
     if self_definition.is_some() {
-        let _ = store.clear_process(
-            &watcher_name,
-            &instance_id,
-        );
+        let _ = store.clear_process(&watcher_name, &instance_id);
     }
 
     Ok(())
@@ -200,78 +165,47 @@ fn monitor(
     watcher_name: &str,
     watcher_address: SocketAddr,
 ) {
-    let mut failures:
-        HashMap<String, u32> =
-        HashMap::new();
+    let mut failures: HashMap<String, u32> = HashMap::new();
 
-    let mut launcher_restart_attempted =
-        false;
+    let mut launcher_restart_attempted = false;
 
     while !stop.load(Ordering::SeqCst) {
-        let snapshot =
-            match store.snapshot() {
-                Ok(snapshot) => snapshot,
+        let snapshot = match store.snapshot() {
+            Ok(snapshot) => snapshot,
 
-                Err(error) => {
-                    println!(
-                        "[Watcher] failed to read executables: {}",
-                        error
-                    );
+            Err(error) => {
+                println!("[Watcher] failed to read executables: {}", error);
 
-                    thread::sleep(
-                        Duration::from_secs(1),
-                    );
+                thread::sleep(Duration::from_secs(1));
 
-                    continue;
-                }
-            };
+                continue;
+            }
+        };
 
         let launcher = snapshot
             .iter()
-            .find(|executable| {
-                executable.name
-                    == launcher_name
-            });
+            .find(|executable| executable.name == launcher_name);
 
-        let Some(launcher) = launcher
-        else {
-            println!(
-                "[Watcher] launcher definition is missing"
-            );
+        let Some(launcher) = launcher else {
+            println!("[Watcher] launcher definition is missing");
 
-            thread::sleep(
-                Duration::from_secs(1),
-            );
+            thread::sleep(Duration::from_secs(1));
 
             continue;
         };
 
-        let launcher_healthy =
-            ws_health::is_healthy(
-                launcher,
-            );
+        let launcher_healthy = ws_health::is_healthy(launcher);
 
-        let launcher_update_restart =
-            needs_update_restart(
-                launcher,
-            );
+        let launcher_update_restart = needs_update_restart(launcher);
 
         let launcher_failure = {
-            let failure =
-                failures
-                    .entry(
-                        launcher.name.clone(),
-                    )
-                    .or_default();
+            let failure = failures.entry(launcher.name.clone()).or_default();
 
             if launcher_healthy {
                 *failure = 0;
-                launcher_restart_attempted =
-                    false;
+                launcher_restart_attempted = false;
             } else {
-                *failure =
-                    failure
-                        .saturating_add(1);
+                *failure = failure.saturating_add(1);
             }
 
             *failure
@@ -286,12 +220,9 @@ fn monitor(
          * processed the restart job.
          */
         if launcher_update_restart
-            || (
-                !launcher_healthy
-                && launcher_failure
-                    >= FAILURE_LIMIT
-                && !launcher_restart_attempted
-            )
+            || (!launcher_healthy
+                && launcher_failure >= FAILURE_LIMIT
+                && !launcher_restart_attempted)
         {
             println!(
                 "[Watcher] restarting launcher {}{}",
@@ -303,32 +234,17 @@ fn monitor(
                 }
             );
 
-            let previous_instance_id =
-                launcher
-                    .process
-                    .as_ref()
-                    .map(|process| {
-                        process.instance_id.clone()
-                    });
+            let previous_instance_id = launcher
+                .process
+                .as_ref()
+                .map(|process| process.instance_id.clone());
 
-            match systemd::restart_persistent(
-                &launcher.name,
-                launcher_name,
-                watcher_name,
-            ) {
+            match systemd::restart_persistent(&launcher.name, launcher_name, watcher_name) {
                 Ok(()) => {
-                    launcher_restart_attempted =
-                        true;
+                    launcher_restart_attempted = true;
 
-                    if let Some(instance_id) =
-                        previous_instance_id
-                    {
-                        if let Err(error) =
-                            store.clear_process(
-                                &launcher.name,
-                                &instance_id,
-                            )
-                        {
+                    if let Some(instance_id) = previous_instance_id {
+                        if let Err(error) = store.clear_process(&launcher.name, &instance_id) {
                             println!(
                                 "[Watcher] failed to clear previous launcher process: {}",
                                 error
@@ -338,21 +254,15 @@ fn monitor(
                 }
 
                 Err(error) => {
-                    println!(
-                        "[Watcher] launcher restart failed: {}",
-                        error
-                    );
+                    println!("[Watcher] launcher restart failed: {}", error);
 
-                    launcher_restart_attempted =
-                        true;
+                    launcher_restart_attempted = true;
                 }
             }
 
             failures.insert(launcher.name.clone(), 0);
 
-            thread::sleep(
-                Duration::from_secs(1),
-            );
+            thread::sleep(Duration::from_secs(1));
 
             continue;
         }
@@ -362,43 +272,24 @@ fn monitor(
          * Restart authority is decided separately.
          */
         for executable in &snapshot {
-            if executable.name
-                == launcher_name
-            {
+            if executable.name == launcher_name {
                 continue;
             }
 
-            let healthy =
-                if executable.name
-                    == watcher_name
-                {
-                    true
-                } else {
-                    ws_health::is_healthy(
-                        executable,
-                    )
-                };
+            let healthy = if executable.name == watcher_name {
+                true
+            } else {
+                ws_health::is_healthy(executable)
+            };
 
-            let update_restart =
-                needs_update_restart(
-                    executable,
-                );
+            let update_restart = needs_update_restart(executable);
 
-            let failure =
-                failures
-                    .entry(
-                        executable
-                            .name
-                            .clone(),
-                    )
-                    .or_default();
+            let failure = failures.entry(executable.name.clone()).or_default();
 
             if healthy {
                 *failure = 0;
             } else {
-                *failure =
-                    failure
-                        .saturating_add(1);
+                *failure = failure.saturating_add(1);
             }
 
             /*
@@ -413,28 +304,16 @@ fn monitor(
              * one complete failure window to become functional before
              * fallback authority activates.
              */
-            if !launcher_restart_attempted
-                || launcher_failure
-                    < FAILURE_LIMIT
-            {
+            if !launcher_restart_attempted || launcher_failure < FAILURE_LIMIT {
                 continue;
             }
 
-            if executable.name
-                == watcher_name
-            {
+            if executable.name == watcher_name {
                 if update_restart {
-                    println!(
-                        "[Watcher] restarting itself after committed update"
-                    );
+                    println!("[Watcher] restarting itself after committed update");
 
-                    if let Err(error) =
-                        systemd::restart_self()
-                    {
-                        println!(
-                            "[Watcher] self restart failed: {}",
-                            error
-                        );
+                    if let Err(error) = systemd::restart_self() {
+                        println!("[Watcher] self restart failed: {}", error);
                     }
 
                     return;
@@ -443,10 +322,7 @@ fn monitor(
                 continue;
             }
 
-            if !update_restart
-                && *failure
-                    < FAILURE_LIMIT
-            {
+            if !update_restart && *failure < FAILURE_LIMIT {
                 continue;
             }
 
@@ -460,19 +336,12 @@ fn monitor(
                 }
             );
 
-            let process_instance_id =
-                Uuid::now_v7().to_string();
+            let process_instance_id = Uuid::now_v7().to_string();
 
-            if let Err(error) =
-                store.expect_process(
-                    &executable.name,
-                    &process_instance_id,
-                )
-            {
+            if let Err(error) = store.expect_process(&executable.name, &process_instance_id) {
                 println!(
                     "[Watcher] failed to reserve {} process instance: {}",
-                    executable.name,
-                    error
+                    executable.name, error
                 );
 
                 *failure = 0;
@@ -480,63 +349,39 @@ fn monitor(
             }
 
             if let Err(error) =
-                systemd::restart_transient(
-                    executable,
-                    &process_instance_id,
-                    watcher_address,
-                )
+                systemd::restart_transient(executable, &process_instance_id, watcher_address)
             {
-                println!(
-                    "[Watcher] failed to restart {}: {}",
-                    executable.name,
-                    error
-                );
+                println!("[Watcher] failed to restart {}: {}", executable.name, error);
             }
 
             *failure = 0;
         }
 
-        thread::sleep(
-            Duration::from_secs(1),
-        );
+        thread::sleep(Duration::from_secs(1));
     }
 }
 
-fn needs_update_restart(
-    executable: &Executable,
-) -> bool {
-    let Some(update_id) = committed_update_id(executable)
-    else {
+fn needs_update_restart(executable: &Executable) -> bool {
+    let Some(update_id) = committed_update_id(executable) else {
         return false;
     };
 
-    let Some(process) =
-        executable.process.as_ref()
-    else {
+    let Some(process) = executable.process.as_ref() else {
         return false;
     };
 
-    process
-        .applied_update_id
-        .as_deref()
-        != Some(update_id.as_str())
+    process.applied_update_id.as_deref() != Some(update_id.as_str())
 }
 
-fn committed_update_id(
-    executable: &Executable,
-) -> Option<String> {
+fn committed_update_id(executable: &Executable) -> Option<String> {
     executable
         .update
         .as_ref()
-        .filter(|update| {
-            update.phase == UpdatePhase::Committed
-        })
+        .filter(|update| update.phase == UpdatePhase::Committed)
         .map(|update| update.update_id.clone())
 }
 
-fn runtime_ws_address(
-    executable: &Executable,
-) -> SocketAddr {
+fn runtime_ws_address(executable: &Executable) -> SocketAddr {
     executable
         .process
         .as_ref()
@@ -544,37 +389,21 @@ fn runtime_ws_address(
         .unwrap_or(executable.default_ws_address)
 }
 
-fn reconcile_runtime_processes(
-    store: &ExecutableStore,
-    watcher_name: &str,
-) -> Result<(), String> {
-    for executable
-        in store.snapshot()?
-    {
-        if executable.name
-            == watcher_name
-        {
+fn reconcile_runtime_processes(store: &ExecutableStore, watcher_name: &str) -> Result<(), String> {
+    for executable in store.snapshot()? {
+        if executable.name == watcher_name {
             continue;
         }
 
-        let Some(process) =
-            executable
-                .process
-                .as_ref()
-        else {
+        let Some(process) = executable.process.as_ref() else {
             continue;
         };
 
-        if ws_health::is_healthy(
-            &executable,
-        ) {
+        if ws_health::is_healthy(&executable) {
             continue;
         }
 
-        store.clear_process(
-            &executable.name,
-            &process.instance_id,
-        )?;
+        store.clear_process(&executable.name, &process.instance_id)?;
     }
 
     Ok(())
@@ -585,16 +414,12 @@ fn data_directory() -> Result<PathBuf, Box<dyn Error>> {
         return Ok(PathBuf::from(directory));
     }
 
-    let manifest = PathBuf::from(
-        env!("CARGO_MANIFEST_DIR"),
-    );
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let root = manifest
         .parent()
         .and_then(|services| services.parent())
-        .ok_or(
-            "watcher manifest has no workspace root",
-        )?;
+        .ok_or("watcher manifest has no workspace root")?;
 
     Ok(root.join("data"))
 }
