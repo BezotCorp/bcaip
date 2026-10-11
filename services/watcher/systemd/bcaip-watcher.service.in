@@ -1,19 +1,22 @@
 [Unit]
-Description=BCAIP Update Watcher
+Description=BCAIP Watcher
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=10
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
+Slice=bcaip.slice
+
 ExecStart=@WATCHER_EXECUTABLE@
-Environment="BCAIP_WATCHER_CONFIG_DIR=@WATCHER_CONFIG_DIR@"
-Environment="BCAIP_WATCHER_STATE_DIR=@WATCHER_STATE_DIR@"
-Environment="BCAIP_WATCHER_BIND_ADDRESS=@WATCHER_BIND_ADDRESS@"
+
+Environment="BCAIP_DATA_DIR=@DATA_DIR@"
+Environment="BCAIP_LAUNCHER_NAME=local_launcher"
+Environment="BCAIP_WATCHER_NAME=watcher"
 
 Restart=always
-RestartSec=2
+RestartSec=30
 
 KillMode=control-group
 TimeoutStopSec=30

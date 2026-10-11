@@ -1,193 +1,572 @@
-mod extension;
-mod file;
-mod files;
-mod health_check;
-mod id;
-mod launcher_cache;
-mod launcher_config;
-mod local_service;
-mod server_config;
-mod server_id;
-mod server_location;
-mod service_config;
-mod watcher_update_phase;
-mod watcher_update_record;
+mod executable;
+mod executable_data;
+mod process;
+mod systemd;
+mod update;
+mod update_phase;
+mod watcher_client;
+mod watcher_request;
+mod watcher_response;
+mod ws_health;
 
-use crate::watcher_update_record::WatcherUpdateRecord;
-use files::Files;
-use std::{
-    env,
-    error::Error,
-    path::PathBuf,
-    sync::Arc,
-    sync::atomic::{AtomicBool, Ordering},
-    thread,
-    time::Duration,
+use crate::executable_data::{
+    load_definitions,
+    load_runtime,
 };
+use crate::executable::Executable;
+use crate::update_phase::UpdatePhase;
+use crate::watcher_request::WatcherRequest;
+use std::collections::HashMap;
+use std::env;
+use std::error::Error;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+use uuid::Uuid;
 
-const DEFAULT_SELF_UPDATE_PRODUCT: &str = "local_launcher";
+const DEFAULT_LAUNCHER_NAME: &str =
+    "local_launcher";
+
+const DEFAULT_WATCHER_NAME: &str =
+    "watcher";
+
+const DEFAULT_BIND_ADDRESS: &str =
+    "127.0.0.1:3009";
+
+const FAILURE_LIMIT: u32 = 3;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let signal_stop = Arc::clone(&stop);
+    let stop =
+        Arc::new(AtomicBool::new(false));
+
+    let signal_stop =
+        Arc::clone(&stop);
 
     ctrlc::set_handler(move || {
-        signal_stop.store(true, Ordering::SeqCst);
+        signal_stop.store(
+            true,
+            Ordering::SeqCst,
+        );
     })?;
 
-    let launcher_directory = match env::var_os("BCAIP_LOCAL_LAUNCHER_CONFIG_DIR") {
-        Some(directory) => PathBuf::from(directory),
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-    };
+    let data_directory =
+        data_directory()?;
 
-    let watcher_state_directory = match env::var_os("BCAIP_WATCHER_STATE_DIR") {
-        Some(directory) => PathBuf::from(directory),
+    let definitions =
+        load_definitions(
+            &data_directory,
+        )?;
 
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|services| services.join("watcher").join("state"))
-            .ok_or("local launcher has no services parent directory")?,
-    };
+    let launcher_name =
+        env::var("BCAIP_LAUNCHER_NAME")
+            .unwrap_or_else(|_| {
+                DEFAULT_LAUNCHER_NAME.to_string()
+            });
 
-    let self_update_product = env::var("BCAIP_LOCAL_LAUNCHER_UPDATE_PRODUCT")
-        .unwrap_or_else(|_| DEFAULT_SELF_UPDATE_PRODUCT.to_string());
+    let watcher_name =
+        env::var("BCAIP_WATCHER_NAME")
+            .unwrap_or_else(|_| {
+                DEFAULT_WATCHER_NAME.to_string()
+            });
 
-    let files = Files::from_launcher_directory(&launcher_directory)?;
-    let launcher_config = files.load_launcher_configuration()?;
+    let self_definition =
+        definitions
+            .iter()
+            .find(|executable| {
+                executable.name
+                    == launcher_name
+            })
+            .cloned();
 
-    let services = launcher_config
-        .local_services(&watcher_state_directory)?;
+    if !definitions
+        .iter()
+        .any(|executable| {
+            executable.name
+                == watcher_name
+        })
+    {
+        return Err(
+            format!(
+                "watcher executable {} is missing from executable definitions",
+                watcher_name
+            )
+            .into(),
+        );
+    }
+
+    let bind_address =
+        match self_definition.as_ref() {
+            Some(executable) => {
+                executable.default_ws_address
+            }
+
+            None => {
+                env::var(
+                    "BCAIP_LOCAL_LAUNCHER_BIND_ADDRESS",
+                )
+                .unwrap_or_else(|_| {
+                    DEFAULT_BIND_ADDRESS.to_string()
+                })
+                .parse::<SocketAddr>()?
+            }
+        };
+
+    let listener =
+        ws_health::bind(
+            bind_address,
+        )?;
+
+    let actual_address =
+        listener.local_addr()?;
+
+    let instance_id =
+        env::var("BCAIP_INSTANCE_ID")
+            .unwrap_or_else(|_| {
+                Uuid::now_v7().to_string()
+            });
+
+    let self_applied_update_id =
+        runtime_executable(
+            &data_directory,
+            &launcher_name,
+        )
+        .and_then(|executable| {
+            committed_update_id(
+                &executable,
+            )
+        });
+
+    let ws_stop =
+        Arc::clone(&stop);
+
+    let ws_executable =
+        launcher_name.clone();
+
+    let ws_instance_id =
+        instance_id.clone();
+
+    let ws_applied_update_id =
+        self_applied_update_id.clone();
+
+    let ws_handle =
+        thread::spawn(move || {
+            ws_health::serve(
+                listener,
+                &ws_stop,
+                ws_executable,
+                ws_instance_id,
+                ws_applied_update_id,
+            );
+        });
 
     println!(
-        "[LocalLauncher] Supervising {} service(s)",
-        services.len()
+        "[LocalLauncher] listening on {}",
+        actual_address
     );
 
-    let self_update_stop = Arc::clone(&stop);
-    let self_update_state_directory = watcher_state_directory.clone();
+    let mut failures:
+        HashMap<String, u32> =
+        HashMap::new();
 
-    let self_update_handle = thread::spawn(move || {
-        monitor_self_update(
-            &self_update_stop,
-            &self_update_state_directory,
-            &self_update_product,
-        );
-    });
+    while !stop.load(Ordering::SeqCst) {
+        let runtime =
+            runtime_snapshot(
+                &data_directory,
+                &definitions,
+            );
 
-    let handles: Vec<_> = services
-        .into_iter()
-        .map(|service| {
-            let thread_stop = Arc::clone(&stop);
+        let watcher = runtime
+            .iter()
+            .find(|executable| {
+                executable.name
+                    == watcher_name
+            });
 
-            thread::spawn(move || {
-                let result = service.monitor(&thread_stop);
+        let Some(watcher) = watcher
+        else {
+            return Err(
+                "watcher disappeared from runtime definitions"
+                    .into(),
+            );
+        };
 
-                if let Err(error) = &result {
-                    eprintln!(
-                        "[LocalLauncher] Fatal supervisor error: {}",
-                        error
-                    );
+        let watcher_address =
+            runtime_ws_address(
+                watcher,
+            );
 
-                    thread_stop.store(true, Ordering::SeqCst);
+        let watcher_healthy =
+            ws_health::is_healthy(
+                watcher,
+            );
+
+        let watcher_update_restart =
+            needs_update_restart(
+                watcher,
+            );
+
+        let watcher_failure =
+            failures
+                .entry(
+                    watcher_name.clone(),
+                )
+                .or_default();
+
+        if watcher_healthy {
+            *watcher_failure = 0;
+        } else {
+            *watcher_failure =
+                watcher_failure
+                    .saturating_add(1);
+        }
+
+        if watcher_update_restart
+            || *watcher_failure
+                >= FAILURE_LIMIT
+        {
+            println!(
+                "[LocalLauncher] restarting watcher {}{}",
+                watcher.name,
+                if watcher_update_restart {
+                    " after committed update"
+                } else {
+                    " after WebSocket health failure"
                 }
+            );
 
-                result
-            })
-        })
-        .collect();
+            if let Err(error) =
+                systemd::restart_persistent(
+                    &watcher.name,
+                    &launcher_name,
+                    &watcher_name,
+                )
+            {
+                println!(
+                    "[LocalLauncher] watcher restart failed: {}",
+                    error
+                );
+            }
 
-    let mut failed = false;
+            *watcher_failure = 0;
 
-    for handle in handles {
-        match handle.join() {
-            Ok(Ok(())) => {}
+            thread::sleep(
+                Duration::from_secs(1),
+            );
 
-            Ok(Err(error)) => {
-                eprintln!(
-                    "[LocalLauncher] Supervisor failed: {}",
+            continue;
+        }
+
+        /*
+         * Watcher owns executables.bin.
+         * Do not create a process that cannot be registered.
+         */
+        if !watcher_healthy {
+            thread::sleep(
+                Duration::from_secs(1),
+            );
+
+            continue;
+        }
+
+        if let Err(error) =
+            watcher_client::acknowledge(
+                watcher_address,
+                &WatcherRequest::ProcessStarted {
+                    executable:
+                        launcher_name.clone(),
+                    pid:
+                        std::process::id(),
+                    instance_id:
+                        instance_id.clone(),
+                    ws_address:
+                        actual_address,
+                    applied_update_id:
+                        self_applied_update_id
+                            .clone(),
+                },
+            )
+        {
+            println!(
+                "[LocalLauncher] watcher registration failed: {}",
+                error
+            );
+
+            thread::sleep(
+                Duration::from_secs(1),
+            );
+
+            continue;
+        }
+
+        for definition in &definitions {
+            if definition.name
+                == launcher_name
+                || definition.name
+                    == watcher_name
+            {
+                continue;
+            }
+
+            let executable = runtime
+                .iter()
+                .find(|candidate| {
+                    candidate.name
+                        == definition.name
+                })
+                .unwrap_or(definition);
+
+            let healthy =
+                ws_health::is_healthy(
+                    executable,
+                );
+
+            let update_restart =
+                needs_update_restart(
+                    executable,
+                );
+
+            if healthy
+                && !update_restart
+            {
+                failures.insert(
+                    executable
+                        .name
+                        .clone(),
+                    0,
+                );
+
+                continue;
+            }
+
+            let should_restart =
+                if update_restart {
+                    true
+                } else {
+                    let failure =
+                        failures
+                            .entry(
+                                executable
+                                    .name
+                                    .clone(),
+                            )
+                            .or_default();
+
+                    *failure =
+                        failure
+                            .saturating_add(1);
+
+                    *failure
+                        >= FAILURE_LIMIT
+                };
+
+            if !should_restart {
+                continue;
+            }
+
+            println!(
+                "[LocalLauncher] restarting {}{}",
+                executable.name,
+                if update_restart {
+                    " after committed update"
+                } else {
+                    " after WebSocket health failure"
+                }
+            );
+
+            let process_instance_id =
+                Uuid::now_v7().to_string();
+
+            if let Err(error) =
+                watcher_client::acknowledge(
+                    watcher_address,
+                    &WatcherRequest::ExpectProcess {
+                        executable:
+                            executable.name.clone(),
+                        instance_id:
+                            process_instance_id.clone(),
+                    },
+                )
+            {
+                println!(
+                    "[LocalLauncher] failed to reserve {} process instance: {}",
+                    executable.name,
                     error
                 );
 
-                failed = true;
+                failures.insert(
+                    executable.name.clone(),
+                    0,
+                );
+
+                continue;
             }
 
-            Err(_) => {
-                eprintln!("[LocalLauncher] Supervisor panicked");
-                stop.store(true, Ordering::SeqCst);
-                failed = true;
+            if let Err(error) =
+                systemd::restart_transient(
+                    executable,
+                    &process_instance_id,
+                    watcher_address,
+                )
+            {
+                println!(
+                    "[LocalLauncher] failed to restart {}: {}",
+                    executable.name,
+                    error
+                );
             }
+
+            failures.insert(
+                executable.name.clone(),
+                0,
+            );
         }
+
+        thread::sleep(
+            Duration::from_secs(1),
+        );
     }
 
-    stop.store(true, Ordering::SeqCst);
+    let runtime =
+        runtime_snapshot(
+            &data_directory,
+            &definitions,
+        );
 
-    if self_update_handle.join().is_err() {
-        eprintln!("[LocalLauncher] Self-update monitor panicked");
-        failed = true;
+    if let Some(watcher_address) =
+        current_watcher_address(
+            &runtime,
+            &watcher_name,
+        )
+    {
+        let _ =
+            watcher_client::acknowledge(
+                watcher_address,
+                &WatcherRequest::ProcessStopped {
+                    executable:
+                        launcher_name,
+                    instance_id,
+                },
+            );
     }
 
-    if failed {
-        return Err("one or more local supervisors failed".into());
-    }
+    let _ = ws_handle.join();
 
     Ok(())
 }
 
-fn monitor_self_update(
-    stop: &AtomicBool,
-    state_directory: &std::path::Path,
-    product: &str,
-) {
-    let mut observed_update_id =
-        match WatcherUpdateRecord::committed_update_id(
-            state_directory,
-            product,
-        ) {
-            Ok(update_id) => update_id,
+fn current_watcher_address(
+    runtime: &[Executable],
+    watcher_name: &str,
+) -> Option<SocketAddr> {
+    runtime
+        .iter()
+        .find(|executable| {
+            executable.name
+                == watcher_name
+        })
+        .map(runtime_ws_address)
+}
 
-            Err(error) => {
-                eprintln!(
-                    "[LocalLauncher] failed to read initial self-update state: {}",
-                    error
-                );
+fn runtime_snapshot(
+    data_directory: &Path,
+    definitions: &[Executable],
+) -> Vec<Executable> {
+    load_runtime(data_directory)
+        .unwrap_or_else(|_| {
+            definitions.to_vec()
+        })
+}
 
-                None
-            }
-        };
+fn runtime_executable(
+    data_directory: &Path,
+    name: &str,
+) -> Option<Executable> {
+    load_runtime(data_directory)
+        .ok()?
+        .into_iter()
+        .find(|executable| {
+            executable.name == name
+        })
+}
 
-    while !stop.load(Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(250));
+fn runtime_ws_address(
+    executable: &Executable,
+) -> SocketAddr {
+    executable
+        .process
+        .as_ref()
+        .map(|process| {
+            process.ws_address
+        })
+        .unwrap_or(
+            executable.default_ws_address,
+        )
+}
 
-        match WatcherUpdateRecord::committed_update_id(
-            state_directory,
-            product,
-        ) {
-            Ok(Some(update_id))
-                if observed_update_id.as_deref()
-                    != Some(update_id.as_str()) =>
-            {
-                eprintln!(
-                    "[LocalLauncher] committed update {} detected for {}; exiting for supervisor restart",
-                    update_id,
-                    product
-                );
+fn committed_update_id(
+    executable: &Executable,
+) -> Option<String> {
+    executable
+        .update
+        .as_ref()
+        .filter(|update| {
+            update.phase
+                == UpdatePhase::Committed
+        })
+        .map(|update| {
+            update.update_id.clone()
+        })
+}
 
-                stop.store(true, Ordering::SeqCst);
-                break;
-            }
+fn needs_update_restart(
+    executable: &Executable,
+) -> bool {
+    let Some(update_id) =
+        committed_update_id(
+            executable,
+        )
+    else {
+        return false;
+    };
 
-            Ok(Some(update_id)) => {
-                observed_update_id = Some(update_id);
-            }
+    let Some(process) =
+        executable.process.as_ref()
+    else {
+        return false;
+    };
 
-            Ok(None) => {}
+    process
+        .applied_update_id
+        .as_deref()
+        != Some(update_id.as_str())
+}
 
-            Err(error) => {
-                eprintln!(
-                    "[LocalLauncher] failed to read self-update state: {}",
-                    error
-                );
-            }
-        }
+fn data_directory(
+) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(directory) =
+        env::var_os("BCAIP_DATA_DIR")
+    {
+        return Ok(
+            PathBuf::from(directory),
+        );
     }
+
+    let manifest =
+        PathBuf::from(
+            env!("CARGO_MANIFEST_DIR"),
+        );
+
+    let root = manifest
+        .parent()
+        .and_then(|services| {
+            services.parent()
+        })
+        .ok_or(
+            "local launcher manifest has no workspace root",
+        )?;
+
+    Ok(root.join("data"))
 }

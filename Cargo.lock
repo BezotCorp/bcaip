@@ -653,6 +653,7 @@ dependencies = [
 name = "watcher"
 version = "0.1.0"
 dependencies = [
+ "bincode-next",
  "ctrlc",
  "ron",
  "serde",

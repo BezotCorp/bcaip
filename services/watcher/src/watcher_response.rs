@@ -1,19 +1,30 @@
-use crate::update_record::UpdateRecord;
-use serde::Serialize;
+use crate::executable::Executable;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub(crate) enum WatcherResponse {
+    Healthy {
+        executable: String,
+        instance_id: String,
+        applied_update_id: Option<String>,
+    },
+
     Accepted {
         update_id: String,
-        product: String,
+        executable: String,
     },
+
     Success {
         update_id: String,
-        product: String,
+        executable: String,
     },
+
     Status {
-        record: Option<UpdateRecord>,
+        executable: Executable,
     },
+
+    Acknowledged,
+
     Failure {
         message: String,
     },

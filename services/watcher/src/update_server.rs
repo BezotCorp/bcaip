@@ -1,127 +1,346 @@
+use crate::begin_update_result::BeginUpdateResult;
+use crate::executable_store::ExecutableStore;
+use crate::executable::Executable;
+use crate::process::Process;
+use crate::update::Update;
 use crate::update_phase::UpdatePhase;
-use crate::update_record::UpdateRecord;
-use crate::update_state_store::UpdateStateStore;
-use crate::watched_product::WatchedProduct;
 use crate::watcher_request::WatcherRequest;
 use crate::watcher_response::WatcherResponse;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use tungstenite::{Message, WebSocket, accept};
+use tungstenite::{
+    Message,
+    WebSocket,
+    accept,
+};
 use uuid::{Uuid, Version};
 
 pub(crate) fn handle_connection(
     stream: TcpStream,
-    products: &HashMap<String, WatchedProduct>,
-    state_store: &UpdateStateStore,
-    self_product: Option<&str>,
-) -> Result<bool, String> {
+    store: &ExecutableStore,
+    watcher_name: &str,
+    watcher_instance_id: &str,
+    watcher_applied_update_id: Option<&str>,
+) -> Result<(), String> {
     let mut socket = accept(stream)
-        .map_err(|error| format!("WebSocket handshake failed: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "WebSocket handshake failed: {error}"
+            )
+        })?;
 
-    let message = socket
-        .read()
-        .map_err(|error| format!("failed to read watcher request: {error}"))?;
+    let message = socket.read().map_err(|error| {
+        format!(
+            "failed to read watcher request: {error}"
+        )
+    })?;
 
-    let Message::Text(text) = message else {
-        let _ = send_response(
+    
+let text = match message {
+    Message::Ping(payload) => {
+        socket
+            .send(Message::Pong(payload))
+            .map_err(|error| {
+                format!("failed to send watcher Pong: {error}")
+            })?;
+
+        return Ok(());
+    }
+
+    Message::Text(text) => text,
+
+    _ => {
+        send_failure(
             &mut socket,
-            &WatcherResponse::Failure {
-                message: "first watcher message must be a RON text request".to_string(),
+            "first watcher message must be RON text",
+        )?;
+
+        return Ok(());
+    }
+};
+
+    let request: WatcherRequest =
+        ron::from_str(text.as_str()).map_err(
+            |error| {
+                format!(
+                    "invalid watcher request: {error}"
+                )
             },
-        );
-
-        return Ok(false);
-    };
-
-    let request: WatcherRequest = ron::from_str(text.as_str())
-        .map_err(|error| format!("invalid watcher request: {error}"))?;
+        )?;
 
     match request {
-        WatcherRequest::Status { product } => {
-            let record = state_store.read(&product)?;
+        WatcherRequest::Health => {
+            send_response(
+                &mut socket,
+                &WatcherResponse::Healthy {
+                    executable:
+                        watcher_name.to_string(),
+                    instance_id:
+                        watcher_instance_id
+                            .to_string(),
+                    applied_update_id:
+                        watcher_applied_update_id
+                            .map(|value| {
+                                value.to_string()
+                            }),
+                },
+            )
+        }
+
+        WatcherRequest::ExpectProcess {
+            executable,
+            instance_id,
+        } => {
+            validate_instance_id(
+                &instance_id,
+            )?;
+
+            if store.get(&executable)?.is_none() {
+                send_failure(
+                    &mut socket,
+                    "unknown executable",
+                )?;
+
+                return Ok(());
+            }
+
+            store.expect_process(
+                &executable,
+                &instance_id,
+            )?;
 
             send_response(
                 &mut socket,
-                &WatcherResponse::Status { record },
-            )?;
-
-            Ok(false)
+                &WatcherResponse::Acknowledged,
+            )
         }
 
-        WatcherRequest::Begin {
+        WatcherRequest::Status { executable } => {
+            let Some(executable) =
+                store.get(&executable)?
+            else {
+                send_failure(
+                    &mut socket,
+                    "unknown executable",
+                )?;
+
+                return Ok(());
+            };
+
+            send_response(
+                &mut socket,
+                &WatcherResponse::Status {
+                    executable,
+                },
+            )
+        }
+
+        WatcherRequest::ProcessStarted {
+            executable,
+            pid,
+            instance_id,
+            ws_address,
+        applied_update_id,
+            } => {
+            validate_instance_id(&instance_id)?;
+
+            if store.get(&executable)?.is_none() {
+                send_failure(
+                    &mut socket,
+                    "unknown executable",
+                )?;
+
+                return Ok(());
+            }
+
+            store.set_process(
+                &executable,
+                Process {
+                        pid,
+                        instance_id,
+                        ws_address,
+                        applied_update_id,
+                    },
+            )?;
+
+            send_response(
+                &mut socket,
+                &WatcherResponse::Acknowledged,
+            )
+        }
+
+        WatcherRequest::ProcessStopped {
+            executable,
+            instance_id,
+        } => {
+            validate_instance_id(&instance_id)?;
+
+            if store.get(&executable)?.is_none() {
+                send_failure(
+                    &mut socket,
+                    "unknown executable",
+                )?;
+
+                return Ok(());
+            }
+
+            store.clear_process(
+                &executable,
+                &instance_id,
+            )?;
+
+            send_response(
+                &mut socket,
+                &WatcherResponse::Acknowledged,
+            )
+        }
+
+        WatcherRequest::BeginUpdate {
             update_id,
-            product,
+            executable,
             expected_size,
             sha256,
         } => {
-            let watched_product = products
-                .get(&product)
-                .ok_or_else(|| format!("unknown product: {product}"))?;
+            let Some(definition) =
+                store.get(&executable)?
+            else {
+                send_failure(
+                    &mut socket,
+                    "unknown executable",
+                )?;
 
-            reconcile_pending(watched_product, state_store)?;
+                return Ok(());
+            };
+
 
             validate_update_id(&update_id)?;
             validate_sha256(&sha256)?;
 
             if expected_size == 0 {
-                return Err("expected_size must be greater than zero".to_string());
+                send_failure(
+                    &mut socket,
+                    "expected_size must be greater than zero",
+                )?;
+
+                return Ok(());
             }
 
-            if let Some(existing) = state_store.read(&product)? {
-                if existing.update_id == update_id
-                    && existing.phase == UpdatePhase::Committed
-                {
+            let sha256 = sha256.to_ascii_lowercase();
+
+            let begin_update = match store.begin_update(
+                &executable,
+                update_id.clone(),
+                expected_size,
+                sha256.clone(),
+            ) {
+                Ok(result) => result,
+
+                Err(error) => {
+                    send_failure(
+                        &mut socket,
+                        &error,
+                    )?;
+
+                    return Ok(());
+                }
+            };
+
+            match begin_update {
+                BeginUpdateResult::AlreadyCommitted => {
                     send_response(
                         &mut socket,
                         &WatcherResponse::Success {
                             update_id,
-                            product: product.clone(),
+                            executable,
                         },
-                    )?;
+                    )
+                }
 
-                    return Ok(self_product == Some(product.as_str()));
+                BeginUpdateResult::AlreadyPending => {
+                    send_failure(
+                        &mut socket,
+                        "the update is already being transferred",
+                    )
+                }
+
+                BeginUpdateResult::Started => {
+                    receive_update(
+                        &mut socket,
+                        &definition,
+                        store,
+                        update_id,
+                        expected_size,
+                        sha256,
+                    )
                 }
             }
-
-            receive_update(
-                &mut socket,
-                watched_product,
-                state_store,
-                update_id,
-                expected_size,
-                sha256.to_ascii_lowercase(),
-            )?;
-
-            Ok(self_product == Some(product.as_str()))
         }
     }
 }
 
-pub(crate) fn reconcile_pending(
-    product: &WatchedProduct,
-    state_store: &UpdateStateStore,
+pub(crate) fn reconcile_all(
+    store: &ExecutableStore,
 ) -> Result<(), String> {
-    let Some(mut record) = state_store.read(&product.name)? else {
+    for executable in store.snapshot()? {
+        reconcile_pending(
+            &executable,
+            store,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn reconcile_pending(
+    executable: &Executable,
+    store: &ExecutableStore,
+) -> Result<(), String> {
+    let Some(mut update) =
+        store
+            .get(&executable.name)?
+            .and_then(|value| value.update)
+    else {
         return Ok(());
     };
 
-    if record.phase != UpdatePhase::Pending {
+    if update.phase != UpdatePhase::Pending {
         return Ok(());
     }
 
-    let target = product.executable_path();
-    let temp = temporary_update_path(&target, &record.update_id)?;
+    let target = executable.path();
+    let temp = temporary_update_path(
+        &target,
+        &update.update_id,
+    )?;
 
-    if file_matches(&target, record.expected_size, &record.sha256)? {
-        record.phase = UpdatePhase::Committed;
-        record.received_size = record.expected_size;
-        record.error = None;
+    if file_matches(
+        &target,
+        update.expected_size,
+        &update.sha256,
+    )? {
+        let parent = target.parent().ok_or_else(
+            || {
+                format!(
+                    "{} has no parent directory",
+                    target.display()
+                )
+            },
+        )?;
 
-        state_store.write(&record)?;
+        sync_directory(parent)?;
+
+        update.phase = UpdatePhase::Committed;
+        update.received_size =
+            update.expected_size;
+        update.error = None;
+
+        store.set_update(
+            &executable.name,
+            update,
+        )?;
 
         let _ = fs::remove_file(temp);
 
@@ -130,53 +349,28 @@ pub(crate) fn reconcile_pending(
 
     let _ = fs::remove_file(temp);
 
-    record.phase = UpdatePhase::Failed;
-    record.error = Some(
-        "watcher restarted or transfer ended before the update committed".to_string(),
+    update.phase = UpdatePhase::Failed;
+    update.error = Some(
+        "watcher restarted before the update committed"
+            .to_string(),
     );
 
-    state_store.write(&record)
+    store.set_update(
+        &executable.name,
+        update,
+    )
 }
 
 fn receive_update(
     socket: &mut WebSocket<TcpStream>,
-    product: &WatchedProduct,
-    state_store: &UpdateStateStore,
+    executable: &Executable,
+    store: &ExecutableStore,
     update_id: String,
     expected_size: u64,
     sha256: String,
 ) -> Result<(), String> {
-    let target = product.executable_path();
-
-    if !target.is_file() {
-        return Err(format!(
-            "{} executable does not exist: {}",
-            product.name,
-            target.display()
-        ));
-    }
-
-    let parent = target.parent().ok_or_else(|| {
-        format!("{} has no parent directory", target.display())
-    })?;
-
-    let permissions = fs::metadata(&target)
-        .map_err(|error| {
-            format!("failed to read {} metadata: {error}", target.display())
-        })?
-        .permissions();
-
-    let temp = temporary_update_path(&target, &update_id)?;
-
-    if temp.exists() {
-        fs::remove_file(&temp).map_err(|error| {
-            format!("failed to remove stale {}: {error}", temp.display())
-        })?;
-    }
-
-    let mut record = UpdateRecord {
+    let mut update = Update {
         update_id: update_id.clone(),
-        product: product.name.clone(),
         phase: UpdatePhase::Pending,
         expected_size,
         received_size: 0,
@@ -184,177 +378,384 @@ fn receive_update(
         error: None,
     };
 
-    state_store.write(&record)?;
+    let target = executable.path();
 
-    let mut file = OpenOptions::new()
+    if !target.is_file() {
+        return fail_reserved_update(
+            socket,
+            executable,
+            store,
+            update,
+            format!(
+                "executable does not exist: {}",
+                target.display()
+            ),
+        );
+    }
+
+    let parent = match target.parent() {
+        Some(parent) => parent,
+
+        None => {
+            return fail_reserved_update(
+                socket,
+                executable,
+                store,
+                update,
+                format!(
+                    "{} has no parent directory",
+                    target.display()
+                ),
+            );
+        }
+    };
+
+    let permissions = match fs::metadata(&target) {
+        Ok(metadata) => metadata.permissions(),
+
+        Err(error) => {
+            return fail_reserved_update(
+                socket,
+                executable,
+                store,
+                update,
+                format!(
+                    "failed to read {} metadata: {error}",
+                    target.display()
+                ),
+            );
+        }
+    };
+
+    let temp = match temporary_update_path(
+        &target,
+        &update_id,
+    ) {
+        Ok(temp) => temp,
+
+        Err(error) => {
+            return fail_reserved_update(
+                socket,
+                executable,
+                store,
+                update,
+                error,
+            );
+        }
+    };
+
+    if temp.exists() {
+        if let Err(error) = fs::remove_file(&temp) {
+            return fail_reserved_update(
+                socket,
+                executable,
+                store,
+                update,
+                format!(
+                    "failed to remove stale {}: {error}",
+                    temp.display()
+                ),
+            );
+        }
+    }
+
+    let mut file = match OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temp)
-        .map_err(|error| {
-            format!("failed to create {}: {error}", temp.display())
-        })?;
+    {
+        Ok(file) => file,
+
+        Err(error) => {
+            return fail_reserved_update(
+                socket,
+                executable,
+                store,
+                update,
+                format!(
+                    "failed to create {}: {error}",
+                    temp.display()
+                ),
+            );
+        }
+    };
 
     if let Err(error) = send_response(
         socket,
         &WatcherResponse::Accepted {
             update_id: update_id.clone(),
-            product: product.name.clone(),
+            executable: executable.name.clone(),
         },
     ) {
         let _ = fs::remove_file(&temp);
 
-        record.phase = UpdatePhase::Failed;
-        record.error = Some(error.clone());
-        let _ = state_store.write(&record);
+        update.phase = UpdatePhase::Failed;
+        update.error = Some(error.clone());
+
+        let _ = store.set_update(
+            &executable.name,
+            update,
+        );
 
         return Err(error);
     }
 
     let mut hasher = Sha256::new();
 
-    let transfer_result = (|| -> Result<(), String> {
-        while record.received_size < expected_size {
-            let message = socket
-                .read()
-                .map_err(|error| format!("update transfer interrupted: {error}"))?;
+    while update.received_size < expected_size {
+        let message = match socket.read() {
+            Ok(message) => message,
 
-            match message {
-                Message::Binary(payload) => {
-                    let payload_size = payload.len() as u64;
+            Err(error) => {
+                return fail_transfer(
+                    socket,
+                    executable,
+                    store,
+                    update,
+                    &temp,
+                    format!(
+                        "update transfer interrupted: {error}"
+                    ),
+                );
+            }
+        };
 
-                    let next_size = record
+        match message {
+            Message::Binary(payload) => {
+                let payload_size =
+                    payload.len() as u64;
+
+                let Some(next_size) =
+                    update
                         .received_size
                         .checked_add(payload_size)
-                        .ok_or_else(|| "received size overflow".to_string())?;
+                else {
+                    return fail_transfer(
+                        socket,
+                        executable,
+                        store,
+                        update,
+                        &temp,
+                        "received size overflow"
+                            .to_string(),
+                    );
+                };
 
-                    if next_size > expected_size {
-                        return Err(format!(
+                if next_size > expected_size {
+                    return fail_transfer(
+                        socket,
+                        executable,
+                        store,
+                        update,
+                        &temp,
+                        format!(
                             "received more bytes than expected: {} > {}",
                             next_size,
                             expected_size
-                        ));
-                    }
-
-                    file.write_all(payload.as_ref()).map_err(|error| {
-                        format!("failed to write {}: {error}", temp.display())
-                    })?;
-
-                    hasher.update(payload.as_ref());
-                    record.received_size = next_size;
+                        ),
+                    );
                 }
 
-                Message::Ping(payload) => {
-                    socket
-                        .send(Message::Pong(payload))
-                        .map_err(|error| format!("failed to send Pong: {error}"))?;
+                if let Err(error) =
+                    file.write_all(payload.as_ref())
+                {
+                    return fail_transfer(
+                        socket,
+                        executable,
+                        store,
+                        update,
+                        &temp,
+                        format!(
+                            "failed to write {}: {error}",
+                            temp.display()
+                        ),
+                    );
                 }
 
-                Message::Close(_) => {
-                    return Err(format!(
-                        "connection closed after {} of {} bytes",
-                        record.received_size,
-                        expected_size
-                    ));
-                }
+                hasher.update(payload.as_ref());
 
-                _ => {
-                    return Err(
-                        "only binary frames are accepted during an update transfer"
-                            .to_string(),
+                update.received_size =
+                    next_size;
+            }
+
+            Message::Ping(payload) => {
+                if let Err(error) = socket.send(
+                    Message::Pong(payload),
+                ) {
+                    return fail_transfer(
+                        socket,
+                        executable,
+                        store,
+                        update,
+                        &temp,
+                        format!(
+                            "failed to send Pong: {error}"
+                        ),
                     );
                 }
             }
-        }
 
-        file.flush().map_err(|error| {
-            format!("failed to flush {}: {error}", temp.display())
-        })?;
+            Message::Close(_) => {
+                let received_size = update.received_size;
 
-        file.sync_all().map_err(|error| {
-            format!("failed to sync {}: {error}", temp.display())
-        })?;
-
-        let digest = hasher.finalize();
-        let actual_sha256 = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-
-        if actual_sha256 != sha256 {
-            return Err(format!(
-                "SHA-256 mismatch: expected {sha256}, got {actual_sha256}"
-            ));
-        }
-
-        fs::set_permissions(&temp, permissions).map_err(|error| {
-            format!(
-                "failed to preserve executable permissions on {}: {error}",
-                temp.display()
-            )
-        })?;
-
-        fs::rename(&temp, &target).map_err(|error| {
-            format!(
-                "failed to atomically replace {}: {error}",
-                target.display()
-            )
-        })?;
-
-        sync_directory(parent)?;
-
-        Ok(())
-    })();
-
-    if let Err(error) = transfer_result {
-        let binary_was_committed =
-            file_matches(&target, expected_size, &sha256).unwrap_or(false);
-
-        if binary_was_committed {
-            record.received_size = expected_size;
-
-            if state_store.write(&record).is_err() {
-                let _ = socket.send(Message::Text(
-                    ron::ser::to_string(&WatcherResponse::Failure {
-                        message: format!(
-                            "binary committed but watcher state is still pending: {error}"
-                        ),
-                    })
-                    .unwrap_or_else(|_| "Failure".to_string())
-                    .into(),
-                ));
-
-                return Ok(());
+                return fail_transfer(
+                    socket,
+                    executable,
+                    store,
+                    update,
+                    &temp,
+                    format!(
+                        "connection closed after {} of {} bytes",
+                        received_size,
+                        expected_size
+                    ),
+                );
             }
-        } else {
-            let _ = fs::remove_file(&temp);
 
-            record.phase = UpdatePhase::Failed;
-            record.error = Some(error.clone());
-
-            let _ = state_store.write(&record);
-
-            let _ = send_response(
-                socket,
-                &WatcherResponse::Failure {
-                    message: error,
-                },
-            );
-
-            return Ok(());
+            _ => {
+                return fail_transfer(
+                    socket,
+                    executable,
+                    store,
+                    update,
+                    &temp,
+                    "only binary frames are accepted during update transfer"
+                        .to_string(),
+                );
+            }
         }
     }
 
-    record.phase = UpdatePhase::Committed;
-    record.received_size = expected_size;
-    record.error = None;
+    if let Err(error) = file.flush() {
+        return fail_transfer(
+            socket,
+            executable,
+            store,
+            update,
+            &temp,
+            format!(
+                "failed to flush {}: {error}",
+                temp.display()
+            ),
+        );
+    }
 
-    state_store.write(&record)?;
+    if let Err(error) = file.sync_all() {
+        return fail_transfer(
+            socket,
+            executable,
+            store,
+            update,
+            &temp,
+            format!(
+                "failed to sync {}: {error}",
+                temp.display()
+            ),
+        );
+    }
+
+    let digest = hasher.finalize();
+
+    let actual_sha256 = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    if actual_sha256 != sha256 {
+        return fail_transfer(
+            socket,
+            executable,
+            store,
+            update,
+            &temp,
+            format!(
+                "SHA-256 mismatch: expected {}, got {}",
+                sha256,
+                actual_sha256
+            ),
+        );
+    }
+
+    if let Err(error) = fs::set_permissions(
+        &temp,
+        permissions,
+    ) {
+        return fail_transfer(
+            socket,
+            executable,
+            store,
+            update,
+            &temp,
+            format!(
+                "failed to preserve executable permissions on {}: {error}",
+                temp.display()
+            ),
+        );
+    }
+
+    if let Err(error) = fs::rename(
+        &temp,
+        &target,
+    ) {
+        return fail_transfer(
+            socket,
+            executable,
+            store,
+            update,
+            &temp,
+            format!(
+                "failed to atomically replace {}: {error}",
+                target.display()
+            ),
+        );
+    }
+
+    /*
+     * Bytes have been renamed into place, but durability is not
+     * confirmed until the parent directory is synced.
+     *
+     * If this fails we deliberately KEEP Pending. Startup
+     * reconciliation hashes the target and retries the directory sync.
+     */
+    if let Err(error) = sync_directory(parent) {
+        update.error = Some(error.clone());
+
+        let _ = store.set_update(
+            &executable.name,
+            update,
+        );
+
+        send_failure(
+            socket,
+            &error,
+        )?;
+
+        return Ok(());
+    }
+
+    update.phase = UpdatePhase::Committed;
+    update.received_size = expected_size;
+    update.error = None;
+
+    if let Err(error) = store.set_update(
+        &executable.name,
+        update,
+    ) {
+        send_failure(
+            socket,
+            &format!(
+                "binary committed but committed state could not be persisted: {error}"
+            ),
+        )?;
+
+        return Ok(());
+    }
 
     send_response(
         socket,
         &WatcherResponse::Success {
             update_id,
-            product: product.name.clone(),
+            executable: executable.name.clone(),
         },
     )?;
 
@@ -363,32 +764,149 @@ fn receive_update(
     Ok(())
 }
 
+fn fail_reserved_update(
+    socket: &mut WebSocket<TcpStream>,
+    executable: &Executable,
+    store: &ExecutableStore,
+    mut update: Update,
+    error: String,
+) -> Result<(), String> {
+    update.phase = UpdatePhase::Failed;
+    update.error = Some(error.clone());
+
+    let _ = store.set_update(
+        &executable.name,
+        update,
+    );
+
+    let _ = send_failure(
+        socket,
+        &error,
+    );
+
+    Ok(())
+}
+
+fn fail_transfer(
+    socket: &mut WebSocket<TcpStream>,
+    executable: &Executable,
+    store: &ExecutableStore,
+    mut update: Update,
+    temp: &Path,
+    error: String,
+) -> Result<(), String> {
+    let _ = fs::remove_file(temp);
+
+    update.phase = UpdatePhase::Failed;
+    update.error = Some(error.clone());
+
+    let _ = store.set_update(
+        &executable.name,
+        update,
+    );
+
+    let _ = send_failure(
+        socket,
+        &error,
+    );
+
+    Ok(())
+}
+
+fn send_failure(
+    socket: &mut WebSocket<TcpStream>,
+    message: &str,
+) -> Result<(), String> {
+    send_response(
+        socket,
+        &WatcherResponse::Failure {
+            message: message.to_string(),
+        },
+    )
+}
+
 fn send_response(
     socket: &mut WebSocket<TcpStream>,
     response: &WatcherResponse,
 ) -> Result<(), String> {
-    let serialized = ron::ser::to_string(response)
-        .map_err(|error| format!("failed to encode watcher response: {error}"))?;
+    let serialized =
+        ron::ser::to_string(response).map_err(
+            |error| {
+                format!(
+                    "failed to encode watcher response: {error}"
+                )
+            },
+        )?;
 
     socket
-        .send(Message::Text(serialized.into()))
-        .map_err(|error| format!("failed to send watcher response: {error}"))
+        .send(
+            Message::Text(
+                serialized.into(),
+            ),
+        )
+        .map_err(|error| {
+            format!(
+                "failed to send watcher response: {error}"
+            )
+        })
 }
 
-fn validate_update_id(value: &str) -> Result<(), String> {
+fn validate_update_id(
+    value: &str,
+) -> Result<(), String> {
     let uuid = Uuid::parse_str(value)
-        .map_err(|error| format!("invalid update UUID: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "invalid update UUID: {error}"
+            )
+        })?;
 
-    if uuid.get_version() != Some(Version::SortRand) {
-        return Err(format!("update_id must be UUIDv7: {uuid}"));
+    if uuid.get_version()
+        != Some(Version::SortRand)
+    {
+        return Err(format!(
+            "update_id must be UUIDv7: {uuid}"
+        ));
     }
 
     Ok(())
 }
 
-fn validate_sha256(value: &str) -> Result<(), String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("sha256 must contain exactly 64 hexadecimal characters".to_string());
+fn validate_instance_id(
+    value: &str,
+) -> Result<(), String> {
+    let uuid = Uuid::parse_str(value)
+        .map_err(|error| {
+            format!(
+                "invalid instance UUID: {error}"
+            )
+        })?;
+
+    if uuid.get_version()
+        != Some(Version::SortRand)
+    {
+        return Err(format!(
+            "instance_id must be UUIDv7: {uuid}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_sha256(
+    value: &str,
+) -> Result<(), String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| {
+                byte.is_ascii_hexdigit()
+            })
+    {
+        return Err(
+            "sha256 must contain exactly 64 hexadecimal characters"
+                .to_string(),
+        );
     }
 
     Ok(())
@@ -398,18 +916,30 @@ fn temporary_update_path(
     target: &Path,
     update_id: &str,
 ) -> Result<PathBuf, String> {
-    let parent = target.parent().ok_or_else(|| {
-        format!("{} has no parent directory", target.display())
-    })?;
+    let parent = target.parent().ok_or_else(
+        || {
+            format!(
+                "{} has no parent directory",
+                target.display()
+            )
+        },
+    )?;
 
     let file_name = target
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("invalid executable filename: {}", target.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "invalid executable filename: {}",
+                target.display()
+            )
+        })?;
 
-    Ok(parent.join(format!(
-        ".{file_name}.{update_id}.update.tmp"
-    )))
+    Ok(
+        parent.join(format!(
+            ".{file_name}.{update_id}.update.tmp"
+        )),
+    )
 }
 
 fn file_matches(
@@ -421,17 +951,30 @@ fn file_matches(
         return Ok(false);
     }
 
-    let mut file = fs::File::open(path)
-        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(
+            |error| {
+                format!(
+                    "failed to open {}: {error}",
+                    path.display()
+                )
+            },
+        )?;
 
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer =
+        [0_u8; 64 * 1024];
     let mut size = 0_u64;
 
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            .map_err(|error| {
+                format!(
+                    "failed to read {}: {error}",
+                    path.display()
+                )
+            })?;
 
         if read == 0 {
             break;
@@ -439,26 +982,39 @@ fn file_matches(
 
         size = size
             .checked_add(read as u64)
-            .ok_or_else(|| "file size overflow".to_string())?;
+            .ok_or_else(|| {
+                "file size overflow"
+                    .to_string()
+            })?;
 
-        hasher.update(&buffer[..read]);
+        hasher.update(
+            &buffer[..read],
+        );
     }
 
     let digest = hasher.finalize();
-    let sha256 = digest
+
+    let actual_sha256 = digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
 
     Ok(
         size == expected_size
-            && sha256.eq_ignore_ascii_case(expected_sha256),
+            && actual_sha256
+                .eq_ignore_ascii_case(
+                    expected_sha256,
+                ),
     )
 }
 
-fn sync_directory(path: &Path) -> Result<(), String> {
+fn sync_directory(
+    path: &Path,
+) -> Result<(), String> {
     fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| {
+            directory.sync_all()
+        })
         .map_err(|error| {
             format!(
                 "failed to sync directory {}: {error}",
