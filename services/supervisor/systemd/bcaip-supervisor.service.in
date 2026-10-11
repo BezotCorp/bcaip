@@ -1,0 +1,24 @@
+[Unit]
+Description=BCAIP supervisor
+After=network.target
+
+[Service]
+# The validated candidate lives in the same cgroup and can become the unit's
+# main process by notifying systemd with MAINPID.
+Type=notify
+NotifyAccess=all
+
+WorkingDirectory=@BCAIP_WORKING_DIRECTORY@
+ExecStart=@BCAIP_EXECUTABLE_PATH@
+
+Restart=always
+RestartSec=1
+
+KillMode=control-group
+TimeoutStopSec=15
+
+Environment=BCAIP_SUPERVISOR_NAME=supervisor
+Environment=BCAIP_WS_ADDRESS=@BCAIP_WS_ADDRESS@
+
+[Install]
+WantedBy=multi-user.target
