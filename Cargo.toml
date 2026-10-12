@@ -12,5 +12,6 @@ members = [
     "libraries/vscode_extension_exchange_format",
     "libraries/storage_exchange_format",
     "services/deploy_bcaip_to_server",
-    "services/local_bcaip_environment_preparer", "libraries/executables_manager",
+    "services/local_bcaip_environment_preparer",
+    "libraries/executables_manager",
 ]

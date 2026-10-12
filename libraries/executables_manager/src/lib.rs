@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod atomic_file;
+mod executable;
+mod executable_id;
+mod executable_index_by_name;
+mod executable_index_by_uuid;
+mod executable_name;
+mod executable_start_phase;
+mod executables_manager;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use executable::Executable;
+pub use executable_id::ExecutableId;
+pub use executable_index_by_name::ExecutableIndexByName;
+pub use executable_index_by_uuid::ExecutableIndexByUuid;
+pub use executable_name::ExecutableName;
+pub use executable_start_phase::ExecutableStartPhase;
+pub use executables_manager::ExecutablesManager;
