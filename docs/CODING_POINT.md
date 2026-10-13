@@ -1,9 +1,14 @@
 # Coding Point
 
+Tous les exécutables nécessaires sont envoyés au serveur cible.
+
 BcaipEnvironmentSetup
 
 - AfterBcaipEnvironmentSetup
-  = exécutables/fichiers obligatoires envoyés au bootstrap
+- Runtime
 
-Runtime
-= non envoyé au bootstrap
+La phase détermine uniquement le moment et le responsable du lancement :
+
+- BcaipEnvironmentSetup : lancé pendant la préparation de l'environnement ;
+- AfterBcaipEnvironmentSetup : lancé après la préparation de l'environnement ;
+- Runtime : lancé par le supervisor une fois l'environnement opérationnel.
