@@ -176,6 +176,7 @@ name = "deploy_bcaip_to_server"
 version = "0.1.0"
 dependencies = [
  "bincode-next",
+ "executables_manager",
  "ron",
  "serde",
  "serde_json",
@@ -354,6 +355,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "local_bcaip_environment_preparer"
 version = "0.1.0"
+dependencies = [
+ "executables_manager",
+]
 
 [[package]]
 name = "log"
@@ -635,6 +639,7 @@ version = "0.1.0"
 dependencies = [
  "bincode-next",
  "ctrlc",
+ "executables_manager",
  "ron",
  "rustix",
  "serde",

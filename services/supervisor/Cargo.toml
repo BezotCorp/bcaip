@@ -11,4 +11,5 @@ serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10.9"
 ctrlc = { version = "3.4", features = ["termination"] }
 tungstenite = "0.28"
-rustix = { version = "1", features = ["event", "net", "pipe", "time"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "time"] }
+executables_manager = { version = "0.1.0", path = "../../libraries/executables_manager" }

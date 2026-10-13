@@ -1,23 +1,20 @@
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+use executables_manager::ExecutableId;
 
 pub(crate) struct BuiltServices {
-    supervisor: PathBuf,
-    preparer: PathBuf,
+    executables: HashMap<ExecutableId, PathBuf>,
 }
 
 impl BuiltServices {
-    pub(crate) fn new(supervisor: PathBuf, preparer: PathBuf) -> Self {
-        Self {
-            supervisor,
-            preparer,
-        }
+    pub(crate) fn new(executables: HashMap<ExecutableId, PathBuf>) -> Self {
+        Self { executables }
     }
 
-    pub(crate) fn supervisor(&self) -> &std::path::Path {
-        &self.supervisor
-    }
-
-    pub(crate) fn preparer(&self) -> &std::path::Path {
-        &self.preparer
+    pub(crate) fn executable(&self, id: ExecutableId) -> Option<&Path> {
+        self.executables.get(&id).map(PathBuf::as_path)
     }
 }

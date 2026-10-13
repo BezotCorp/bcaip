@@ -1,4 +1,5 @@
 use crate::atomic_file::AtomicFile;
+use crate::executable_runtime::ExecutableRuntime;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -54,7 +55,21 @@ impl RuntimeStateBackup {
             let bytes = fs::read(&copy_path)
                 .map_err(|error| format!("failed to read {}: {error}", copy_path.display()))?;
 
-            return AtomicFile::write(path, &bytes);
+            // The copy is only read, never rewritten. A copy taken before
+            // the layout change is restored in the current layout.
+            let (runtimes, migrated) =
+                ExecutableRuntime::decode_state(&bytes).map_err(|error| {
+                    format!(
+                        "backup {} cannot be restored: {error}; it is left untouched",
+                        copy_path.display()
+                    )
+                })?;
+
+            return if migrated {
+                AtomicFile::write(path, &ExecutableRuntime::encode_state(&runtimes)?)
+            } else {
+                AtomicFile::write(path, &bytes)
+            };
         }
 
         if path.exists() {

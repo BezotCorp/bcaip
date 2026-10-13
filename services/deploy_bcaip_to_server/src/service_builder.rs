@@ -1,35 +1,48 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
+use executables_manager::Executable;
 use serde_json::Value;
 
-use crate::built_services::BuiltServices;
+use crate::{built_services::BuiltServices, remote_server::RemoteServer};
 
 pub(crate) struct ServiceBuilder;
 
 impl ServiceBuilder {
-    pub(crate) fn build(
+    pub(crate) fn build_for(
+        remote: &RemoteServer,
         workspace_root: &Path,
-        remote_os: &str,
-        remote_architecture: &str,
+        executables: &[Executable],
     ) -> Result<BuiltServices, String> {
-        let target = Self::rust_target(remote_os, remote_architecture)?;
+        let remote_os = remote.operating_system()?;
+        let remote_architecture = remote.architecture()?;
+        let target = Self::rust_target(&remote_os, &remote_architecture)?;
 
-        let output = Command::new("cargo")
+        let mut binaries = Vec::new();
+
+        for executable in executables {
+            let binary = Self::binary_name(executable)?;
+
+            if !binaries.contains(&binary) {
+                binaries.push(binary);
+            }
+        }
+
+        let mut command = Command::new("cargo");
+
+        command
             .current_dir(workspace_root)
-            .args([
-                "build",
-                "--release",
-                "--target",
-                target,
-                "-p",
-                "supervisor",
-                "-p",
-                "local_bcaip_environment_preparer",
-                "--message-format=json-render-diagnostics",
-            ])
+            .args(["build", "--release", "--target", target]);
+
+        for binary in &binaries {
+            command.args(["--bin", binary]);
+        }
+
+        let output = command
+            .arg("--message-format=json-render-diagnostics")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .output()
@@ -42,8 +55,7 @@ impl ServiceBuilder {
         let stdout = String::from_utf8(output.stdout)
             .map_err(|error| format!("cargo build returned invalid UTF-8: {error}"))?;
 
-        let mut supervisor = None;
-        let mut preparer = None;
+        let mut built: HashMap<String, PathBuf> = HashMap::new();
 
         for line in stdout.lines() {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
@@ -66,19 +78,30 @@ impl ServiceBuilder {
                 continue;
             };
 
-            match name {
-                "supervisor" => supervisor = Some(PathBuf::from(executable)),
-                "local_bcaip_environment_preparer" => preparer = Some(PathBuf::from(executable)),
-                _ => {}
-            }
+            built.insert(name.to_string(), PathBuf::from(executable));
         }
 
-        Ok(BuiltServices::new(
-            supervisor.ok_or_else(|| "cargo did not return the supervisor binary".to_string())?,
-            preparer.ok_or_else(|| {
-                "cargo did not return the local_bcaip_environment_preparer binary".to_string()
-            })?,
-        ))
+        let mut built_executables = HashMap::new();
+
+        for executable in executables {
+            let binary = Self::binary_name(executable)?;
+            let path = built
+                .get(&binary)
+                .ok_or_else(|| format!("cargo did not return the binary {binary}"))?
+                .clone();
+
+            built_executables.insert(executable.id(), path);
+        }
+
+        Ok(BuiltServices::new(built_executables))
+    }
+
+    fn binary_name(executable: &Executable) -> Result<String, String> {
+        Path::new(executable.executable_path())
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("{} has no binary file name", executable.name()))
     }
 
     fn rust_target(remote_os: &str, remote_architecture: &str) -> Result<&'static str, String> {

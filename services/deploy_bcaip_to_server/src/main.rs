@@ -1,10 +1,7 @@
 mod built_services;
 mod deployment;
 mod deployment_paths;
-mod executable;
-mod executable_data;
 mod initial_deployment;
-mod process;
 mod remote_server;
 mod server_deployment_descriptor;
 mod server_deployment_index;
@@ -14,11 +11,34 @@ mod service_builder;
 mod supervisor_health;
 mod supervisor_health_request;
 mod supervisor_health_response;
-mod update;
-mod update_phase;
 
 use deployment::Deployment;
+use executables_manager::ExecutionEnvironment;
 
 fn main() -> Result<(), String> {
-    Deployment::new()?.run()
+    let mut arguments = std::env::args().skip(1);
+
+    if arguments.next().as_deref() != Some("--environment") {
+        return Err("--environment development|production is required".to_string());
+    }
+
+    let environment = match arguments
+        .next()
+        .ok_or_else(|| "--environment requires development or production".to_string())?
+        .as_str()
+    {
+        "development" => ExecutionEnvironment::Development,
+        "production" => ExecutionEnvironment::Production,
+        value => {
+            return Err(format!(
+                "invalid environment {value}: expected development or production"
+            ));
+        }
+    };
+
+    if let Some(argument) = arguments.next() {
+        return Err(format!("unexpected argument: {argument}"));
+    }
+
+    Deployment::new(environment)?.run()
 }

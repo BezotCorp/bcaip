@@ -46,11 +46,7 @@ impl DeploymentPaths {
         self.servers_directory.join(format!("{server_key}.bin"))
     }
 
-    pub(crate) fn executables_ron(&self) -> PathBuf {
-        self.data_directory.join("executables.ron")
-    }
-
-    pub(crate) fn executables_bin(&self) -> PathBuf {
-        self.data_directory.join("executables.bin")
+    pub(crate) fn data_directory(&self) -> &Path {
+        &self.data_directory
     }
 }

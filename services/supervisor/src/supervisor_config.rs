@@ -1,16 +1,17 @@
 use crate::executable::Executable;
+use executables_manager::{ExecutableId, ExecutablesManager, ExecutionEnvironment};
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-const DEFAULT_SUPERVISOR_NAME: &str = "supervisor";
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3010";
 const DEFAULT_CANDIDATE_BIND_ADDRESS: &str = "127.0.0.1:3011";
 
 #[derive(Clone, Debug)]
 pub(crate) struct SupervisorConfig {
     data_directory: PathBuf,
+    supervisor_id: ExecutableId,
     supervisor_name: String,
     bind_address_override: Option<SocketAddr>,
     candidate_bind_address: SocketAddr,
@@ -20,13 +21,21 @@ pub(crate) struct SupervisorConfig {
 
 impl SupervisorConfig {
     pub(crate) fn from_env() -> Result<Self, Box<dyn Error>> {
-        let supervisor_name = env::var("BCAIP_SUPERVISOR_NAME")
-            .or_else(|_| env::var("BCAIP_EXECUTABLE_NAME"))
-            .unwrap_or_else(|_| DEFAULT_SUPERVISOR_NAME.to_string());
+        let data_directory = Self::load_data_directory()?;
+        let supervisor_id = ExecutableId::parse(
+            &env::var("BCAIP_EXECUTABLE_ID")
+                .map_err(|_| "BCAIP_EXECUTABLE_ID must identify this supervisor")?,
+        )?;
+        let supervisor = ExecutablesManager::new(
+            &data_directory,
+            ExecutionEnvironment::detect(&data_directory)?,
+        )
+        .resolve_by_id(supervisor_id)?;
 
         Ok(Self {
-            data_directory: Self::load_data_directory()?,
-            supervisor_name,
+            data_directory,
+            supervisor_id,
+            supervisor_name: supervisor.name().as_str().to_string(),
             bind_address_override: Self::bind_address_override()?,
             candidate_bind_address: Self::load_candidate_bind_address()?,
             candidate: env::var_os("BCAIP_SUPERVISOR_CANDIDATE").is_some(),
@@ -53,7 +62,7 @@ impl SupervisorConfig {
     }
 
     pub(crate) fn is_current_supervisor(&self, executable: &Executable) -> bool {
-        executable.is_named(&self.supervisor_name)
+        executable.id() == self.supervisor_id
     }
 
     pub(crate) fn candidate_bind_address(&self) -> SocketAddr {

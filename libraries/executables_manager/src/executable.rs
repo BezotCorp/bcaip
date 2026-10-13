@@ -7,7 +7,7 @@ use bincode_next::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    executable_id::ExecutableId, executable_name::ExecutableName,
+    executable_id::ExecutableId, executable_name::ExecutableName, executable_role::ExecutableRole,
     executable_start_phase::ExecutableStartPhase,
 };
 
@@ -16,6 +16,8 @@ pub struct Executable {
     id: ExecutableId,
     name: ExecutableName,
     start_phase: ExecutableStartPhase,
+    #[serde(default)]
+    roles: Vec<ExecutableRole>,
     working_directory: String,
     executable_path: String,
     default_ws_address: SocketAddr,
@@ -26,6 +28,7 @@ impl Executable {
         id: ExecutableId,
         name: ExecutableName,
         start_phase: ExecutableStartPhase,
+        roles: Vec<ExecutableRole>,
         working_directory: String,
         executable_path: String,
         default_ws_address: SocketAddr,
@@ -34,6 +37,7 @@ impl Executable {
             id,
             name,
             start_phase,
+            roles,
             working_directory,
             executable_path,
             default_ws_address,
@@ -54,6 +58,14 @@ impl Executable {
 
     pub fn start_phase(&self) -> ExecutableStartPhase {
         self.start_phase
+    }
+
+    pub fn roles(&self) -> &[ExecutableRole] {
+        &self.roles
+    }
+
+    pub fn has_role(&self, role: ExecutableRole) -> bool {
+        self.roles.contains(&role)
     }
 
     pub fn working_directory(&self) -> &str {

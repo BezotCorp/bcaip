@@ -10,6 +10,8 @@ use crate::{
     atomic_file::AtomicFile, executable::Executable, executable_id::ExecutableId,
     executable_index_by_name::ExecutableIndexByName,
     executable_index_by_uuid::ExecutableIndexByUuid, executable_name::ExecutableName,
+    executable_role::ExecutableRole, executable_start_phase::ExecutableStartPhase,
+    execution_environment::ExecutionEnvironment,
 };
 
 const INDEX_BY_NAME: &str = "index_by_name";
@@ -20,9 +22,9 @@ pub struct ExecutablesManager {
 }
 
 impl ExecutablesManager {
-    pub fn new(data_directory: impl AsRef<Path>) -> Self {
+    pub fn new(data_directory: impl AsRef<Path>, environment: ExecutionEnvironment) -> Self {
         Self {
-            directory: data_directory.as_ref().join("executables"),
+            directory: environment.resolve(&data_directory.as_ref().join("executables")),
         }
     }
 
@@ -39,26 +41,90 @@ impl ExecutablesManager {
         })?;
 
         let executables = self.read_sources()?;
+        let files = self.expected_files(&executables)?;
 
-        let mut by_name = ExecutableIndexByName::default();
-        let mut by_uuid = ExecutableIndexByUuid::default();
-
-        for executable in &executables {
-            by_name.insert(executable.name().clone(), executable.id())?;
-            by_uuid.insert(executable.id(), executable.name().clone())?;
-
-            self.write_binary_executable(executable)?;
-        }
-
-        self.remove_stale_binary_executables(&executables)?;
-
-        self.write_ron(self.index_by_name_ron_path(), &by_name)?;
-        self.write_binary(self.index_by_name_bin_path(), &by_name)?;
-
-        self.write_ron(self.index_by_uuid_ron_path(), &by_uuid)?;
-        self.write_binary(self.index_by_uuid_bin_path(), &by_uuid)
+        self.apply(&executables, &files)
     }
 
+    /// For the side that owns the RON sources (development, CI): guarantees
+    /// that the materialized files are exactly what the current RON sources
+    /// produce. Never call it where only the `.bin` files exist (a server):
+    /// with no source it would materialize an empty set and remove them.
+    /// Readers use `get_by_id`, `get_by_name`, `list` and the helpers below,
+    /// which only read the `.bin` files.
+    ///
+    /// Details: every expected `.bin` and index is compared
+    /// byte for byte, and `.bin` files without a source are detected. Nothing
+    /// is written when everything already matches.
+    pub fn ensure_materialized(&self) -> Result<(), String> {
+        if !self.directory.exists() {
+            return self.materialize();
+        }
+
+        let executables = self.read_sources()?;
+        let files = self.expected_files(&executables)?;
+
+        if self.stale_binary_executables(&executables)?.is_empty()
+            && files
+                .iter()
+                .all(|(path, expected)| fs::read(path).is_ok_and(|current| &current == expected))
+        {
+            return Ok(());
+        }
+
+        self.apply(&executables, &files)
+    }
+
+    /// Resolves an executable that must exist, e.g. the one a process was told to be.
+    pub fn resolve_by_id(&self, id: ExecutableId) -> Result<Executable, String> {
+        self.get_by_id(id)?
+            .ok_or_else(|| format!("unknown executable: {id}"))
+    }
+
+    pub fn list_by_start_phase(
+        &self,
+        start_phase: ExecutableStartPhase,
+    ) -> Result<Vec<Executable>, String> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|executable| executable.start_phase() == start_phase)
+            .collect())
+    }
+
+    pub fn list_by_role(&self, role: ExecutableRole) -> Result<Vec<Executable>, String> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|executable| executable.has_role(role))
+            .collect())
+    }
+
+    pub fn resolve_unique_by_role(&self, role: ExecutableRole) -> Result<Executable, String> {
+        let mut executables = self.list_by_role(role)?;
+
+        match executables.len() {
+            1 => Ok(executables.remove(0)),
+            count => Err(format!(
+                "exactly one executable with role {role:?} is required, found {count}"
+            )),
+        }
+    }
+
+    /// The `.bin` files of the current materialization (every executable and
+    /// both indexes), e.g. to ship them to a machine that only reads them.
+    pub fn binary_files(&self) -> Result<Vec<PathBuf>, String> {
+        let mut files = vec![self.index_by_name_bin_path(), self.index_by_uuid_bin_path()];
+
+        for id in self
+            .read_binary::<ExecutableIndexByUuid>(self.index_by_uuid_bin_path())?
+            .ids()
+        {
+            files.push(self.executable_bin_path(id));
+        }
+
+        Ok(files)
+    }
     pub fn get_by_name(&self, name: &ExecutableName) -> Result<Option<Executable>, String> {
         let index: ExecutableIndexByName = self.read_binary(self.index_by_name_bin_path())?;
 
@@ -201,11 +267,68 @@ impl ExecutablesManager {
         Ok(executables)
     }
 
-    fn remove_stale_binary_executables(&self, executables: &[Executable]) -> Result<(), String> {
+    fn apply(
+        &self,
+        executables: &[Executable],
+        files: &[(PathBuf, Vec<u8>)],
+    ) -> Result<(), String> {
+        for (path, bytes) in files {
+            AtomicFile::write(path, bytes)?;
+        }
+
+        for path in self.stale_binary_executables(executables)? {
+            fs::remove_file(&path)
+                .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Every file the sources must be materialized into, with its exact content.
+    fn expected_files(
+        &self,
+        executables: &[Executable],
+    ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+        let mut by_name = ExecutableIndexByName::default();
+        let mut by_uuid = ExecutableIndexByUuid::default();
+        let mut files = Vec::new();
+
+        for executable in executables {
+            by_name.insert(executable.name().clone(), executable.id())?;
+            by_uuid.insert(executable.id(), executable.name().clone())?;
+
+            files.push((
+                self.executable_bin_path(executable.id()),
+                Self::encode_binary(&self.executable_bin_path(executable.id()), executable)?,
+            ));
+        }
+
+        files.push((
+            self.index_by_name_ron_path(),
+            Self::encode_ron(&self.index_by_name_ron_path(), &by_name)?,
+        ));
+        files.push((
+            self.index_by_name_bin_path(),
+            Self::encode_binary(&self.index_by_name_bin_path(), &by_name)?,
+        ));
+        files.push((
+            self.index_by_uuid_ron_path(),
+            Self::encode_ron(&self.index_by_uuid_ron_path(), &by_uuid)?,
+        ));
+        files.push((
+            self.index_by_uuid_bin_path(),
+            Self::encode_binary(&self.index_by_uuid_bin_path(), &by_uuid)?,
+        ));
+
+        Ok(files)
+    }
+
+    fn stale_binary_executables(&self, executables: &[Executable]) -> Result<Vec<PathBuf>, String> {
         let valid: HashSet<String> = executables
             .iter()
             .map(|executable| executable.id().to_string())
             .collect();
+        let mut stale = Vec::new();
 
         let entries = fs::read_dir(&self.directory).map_err(|error| {
             format!(
@@ -237,12 +360,11 @@ impl ExecutablesManager {
             }
 
             if ExecutableId::parse(stem).is_ok() {
-                fs::remove_file(&path)
-                    .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+                stale.push(path);
             }
         }
 
-        Ok(())
+        Ok(stale)
     }
 
     fn executable_ron_path(&self, id: ExecutableId) -> PathBuf {
@@ -273,24 +395,24 @@ impl ExecutablesManager {
     where
         T: serde::Serialize,
     {
-        let serialized = ron::ser::to_string_pretty(value, ron::ser::PrettyConfig::default())
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
-
-        AtomicFile::write(&path, serialized.as_bytes())
+        AtomicFile::write(&path, &Self::encode_ron(&path, value)?)
     }
 
-    fn write_binary<T>(&self, path: PathBuf, value: &T) -> Result<(), String>
+    fn encode_ron<T>(path: &Path, value: &T) -> Result<Vec<u8>, String>
+    where
+        T: serde::Serialize,
+    {
+        ron::ser::to_string_pretty(value, ron::ser::PrettyConfig::default())
+            .map(String::into_bytes)
+            .map_err(|error| format!("failed to encode {}: {error}", path.display()))
+    }
+
+    fn encode_binary<T>(path: &Path, value: &T) -> Result<Vec<u8>, String>
     where
         T: Encode,
     {
-        let encoded = encode_to_vec(value, bincode_next::config::standard())
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
-
-        AtomicFile::write(&path, &encoded)
-    }
-
-    fn write_binary_executable(&self, executable: &Executable) -> Result<(), String> {
-        self.write_binary(self.executable_bin_path(executable.id()), executable)
+        encode_to_vec(value, bincode_next::config::standard())
+            .map_err(|error| format!("failed to encode {}: {error}", path.display()))
     }
 
     fn read_binary<T>(&self, path: PathBuf) -> Result<T, String>

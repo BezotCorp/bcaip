@@ -14,7 +14,7 @@ pub(crate) enum SupervisorHealthResponse {
 }
 
 impl SupervisorHealthResponse {
-    pub(crate) fn is_healthy_supervisor(&self) -> bool {
+    pub(crate) fn is_healthy(&self, expected_executable: &str) -> bool {
         match self {
             Self::Healthy {
                 executable,
@@ -23,7 +23,7 @@ impl SupervisorHealthResponse {
             } => {
                 let _ = applied_update_id;
 
-                executable == "supervisor" && !instance_id.is_empty()
+                executable == expected_executable && !instance_id.is_empty()
             }
 
             Self::Failure { message } => {

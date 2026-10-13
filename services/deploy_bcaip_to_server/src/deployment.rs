@@ -1,6 +1,9 @@
+use executables_manager::{
+    ExecutableRole, ExecutableStartPhase, ExecutablesManager, ExecutionEnvironment,
+};
+
 use crate::{
-    deployment_paths::DeploymentPaths, executable_data::ExecutableData,
-    initial_deployment::InitialDeployment,
+    deployment_paths::DeploymentPaths, initial_deployment::InitialDeployment,
     server_deployment_descriptor::ServerDeploymentDescriptor,
     server_deployment_index::ServerDeploymentIndex,
     server_deployment_status::ServerDeploymentStatus, supervisor_health::SupervisorHealth,
@@ -8,12 +11,14 @@ use crate::{
 
 pub(crate) struct Deployment {
     paths: DeploymentPaths,
+    environment: ExecutionEnvironment,
 }
 
 impl Deployment {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub(crate) fn new(environment: ExecutionEnvironment) -> Result<Self, String> {
         Ok(Self {
             paths: DeploymentPaths::discover()?,
+            environment,
         })
     }
 
@@ -32,12 +37,24 @@ impl Deployment {
             return Ok(());
         }
 
-        let executable_data = ExecutableData::load_or_materialize(
-            self.paths.executables_ron(),
-            self.paths.executables_bin(),
-        )?;
+        // This side owns the RON sources: the shipped `.bin` are materialized from them.
+        let manager = ExecutablesManager::new(self.paths.data_directory(), self.environment);
 
-        let supervisor_ws_address = executable_data.supervisor()?.default_ws_address();
+        manager.ensure_materialized()?;
+
+        let executables = manager.list()?;
+        let executable_files = manager.binary_files()?;
+
+        if !executables.iter().any(|executable| {
+            executable.start_phase() == ExecutableStartPhase::BcaipEnvironmentSetup
+        }) {
+            return Err("no executable belongs to BcaipEnvironmentSetup".to_string());
+        }
+
+        let authority = manager.resolve_unique_by_role(ExecutableRole::BcaipAuthorityServer)?;
+
+        let supervisor_ws_address = authority.default_ws_address();
+        let supervisor_name = authority.name().as_str();
 
         for position in 0..index.len() {
             let Some(entry) = index.entry(position) else {
@@ -61,8 +78,9 @@ impl Deployment {
                     InitialDeployment::execute(
                         &descriptor,
                         self.paths.workspace_root(),
-                        executable_data.binary_path(),
-                        supervisor_ws_address,
+                        &executables,
+                        &executable_files,
+                        self.environment,
                         || {
                             let entry = index.entry_mut(position).ok_or_else(|| {
                                 format!("server index entry disappeared: {server_key}")
@@ -73,7 +91,8 @@ impl Deployment {
                         },
                     )?;
 
-                    if SupervisorHealth::check(&descriptor, supervisor_ws_address)? {
+                    if SupervisorHealth::check(&descriptor, supervisor_ws_address, supervisor_name)?
+                    {
                         let entry = index.entry_mut(position).ok_or_else(|| {
                             format!("server index entry disappeared: {server_key}")
                         })?;
@@ -88,7 +107,8 @@ impl Deployment {
                 }
 
                 ServerDeploymentStatus::Pending => {
-                    if SupervisorHealth::check(&descriptor, supervisor_ws_address)? {
+                    if SupervisorHealth::check(&descriptor, supervisor_ws_address, supervisor_name)?
+                    {
                         let entry = index.entry_mut(position).ok_or_else(|| {
                             format!("server index entry disappeared: {server_key}")
                         })?;

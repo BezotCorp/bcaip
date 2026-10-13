@@ -35,23 +35,11 @@ impl LocalEnvironment {
         &self.bcaip_directory
     }
 
-    pub(crate) fn services_directory(&self) -> PathBuf {
-        self.bcaip_directory.join("services")
-    }
-
-    pub(crate) fn supervisor(&self) -> PathBuf {
-        self.services_directory().join("supervisor")
-    }
-
     pub(crate) fn data_directory(&self) -> &std::path::Path {
         &self.data_directory
     }
 
-    pub(crate) fn executables_bin(&self) -> PathBuf {
-        self.data_directory.join("executables.bin")
-    }
-
-    pub(crate) fn supervisor_unit(&self) -> PathBuf {
-        self.service_directory.join("bcaip-supervisor.service")
+    pub(crate) fn service_directory(&self) -> &std::path::Path {
+        &self.service_directory
     }
 }

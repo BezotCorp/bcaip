@@ -2,12 +2,14 @@ use crate::atomic_file::AtomicFile;
 use crate::authority_state::AuthorityState;
 use crate::begin_update_result::BeginUpdateResult;
 use crate::executable::Executable;
+use crate::executable_runtime::ExecutableRuntime;
 use crate::handover_journal::HandoverJournal;
-use crate::process::Process;
+use crate::managed_process::ManagedProcess;
 use crate::runtime_handover::RuntimeHandover;
 use crate::runtime_state_backup::RuntimeStateBackup;
-use crate::update::Update;
-use bincode_next::{decode_from_slice, encode_to_vec};
+use executables_manager::Process;
+use executables_manager::Update;
+use executables_manager::{ExecutableId, ExecutablesManager, ExecutionEnvironment};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -21,7 +23,10 @@ pub(crate) struct ExecutableStore {
     source_path: PathBuf,
     runtime_path: PathBuf,
     executables: Mutex<Vec<Executable>>,
-    authoritative_instances: Mutex<HashMap<String, String>>,
+    authoritative_instances: Mutex<HashMap<ExecutableId, String>>,
+    /// Runtime state of executables without a definition whose process may
+    /// still be alive. Kept untouched (and persisted) until it is gone.
+    orphans: Vec<ExecutableRuntime>,
     authority: AuthorityState,
     write_gate: Mutex<()>,
 }
@@ -35,65 +40,54 @@ impl ExecutableStore {
             )
         })?;
 
-        let local_source = data_directory.join("executables.local.ron");
-        let production_source = data_directory.join("executables.ron");
+        let definitions = ExecutablesManager::new(
+            data_directory,
+            ExecutionEnvironment::detect(data_directory)?,
+        );
 
-        let source_path = if local_source.exists() {
-            local_source
-        } else {
-            production_source
-        };
+        let definitions_list = definitions.list()?;
 
+        let source_path = definitions.directory().to_path_buf();
         let runtime_path = Self::runtime_path(data_directory);
 
-        let source = fs::read_to_string(&source_path)
-            .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+        let (mut runtimes, legacy_bytes) = Self::read_runtime_state(&runtime_path)?;
 
-        let mut executables: Vec<Executable> = ron::from_str(&source)
-            .map_err(|error| format!("failed to decode {}: {error}", source_path.display()))?;
+        let executables: Vec<Executable> = definitions_list
+            .into_iter()
+            .map(|definition| match runtimes.remove(&definition.id()) {
+                Some(runtime) => Executable::with_runtime(definition, runtime),
+                None => Executable::new(definition),
+            })
+            .collect();
 
         Self::validate_definitions(&executables)?;
-
-        for executable in &executables {
-            if executable.has_runtime_state() {
-                return Err(format!(
-                    "{} source definition must have process = None and update = None",
-                    executable.name()
-                ));
-            }
-        }
-
-        if let Ok(bytes) = fs::read(&runtime_path) {
-            let config = bincode_next::config::standard();
-
-            if let Ok((previous, consumed)) =
-                decode_from_slice::<Vec<Executable>, _>(&bytes, config)
-            {
-                if consumed == bytes.len() {
-                    Self::merge_runtime_state(&mut executables, previous);
-                }
-            }
-        }
 
         let authoritative_instances = executables
             .iter()
             .filter_map(|executable| {
                 executable
                     .process_instance_id_owned()
-                    .map(|instance_id| (executable.name_owned(), instance_id))
+                    .map(|instance_id| (executable.id(), instance_id))
             })
             .collect();
+
+        let orphans = Self::retain_orphans(runtimes.into_values());
 
         let store = Self {
             source_path,
             runtime_path,
             executables: Mutex::new(executables),
             authoritative_instances: Mutex::new(authoritative_instances),
+            orphans,
             authority,
             write_gate: Mutex::new(()),
         };
 
         if store.authority.can_write() {
+            if let Some(bytes) = legacy_bytes {
+                store.keep_pre_migration_copy(&bytes)?;
+            }
+
             store.persist()?;
         }
 
@@ -176,7 +170,7 @@ impl ExecutableStore {
         let mut hasher = Sha256::new();
 
         for executable in executables.iter() {
-            hasher.update(executable.encode_runtime_state()?);
+            hasher.update(executable.runtime().encode()?);
         }
 
         Ok(hasher
@@ -225,7 +219,7 @@ impl ExecutableStore {
         update.fail(error);
         executables[index].replace_update_state(update);
 
-        if let Err(error) = Self::persist_snapshot(&self.runtime_path, &executables) {
+        if let Err(error) = self.persist_snapshot(&executables) {
             executables[index].recover_update_after_persist_failure(previous);
 
             return Err(error);
@@ -258,19 +252,19 @@ impl ExecutableStore {
 
         self.ensure_writer()?;
 
-        {
+        let id = {
             let executables = self
                 .executables
                 .lock()
                 .map_err(|_| "executables store lock poisoned".to_string())?;
 
-            Self::executable_index(&executables, name)?;
-        }
+            executables[Self::executable_index(&executables, name)?].id()
+        };
 
         self.authoritative_instances
             .lock()
             .map_err(|_| "authoritative instances lock poisoned".to_string())?
-            .insert(name.to_string(), instance_id.to_string());
+            .insert(id, instance_id.to_string());
 
         Ok(())
     }
@@ -292,7 +286,9 @@ impl ExecutableStore {
             .lock()
             .map_err(|_| "authoritative instances lock poisoned".to_string())?;
 
-        if let Some(expected) = authoritative_instances.get(name) {
+        let id = executables[index].id();
+
+        if let Some(expected) = authoritative_instances.get(&id) {
             if !process.has_instance_id(expected) {
                 return Err(format!(
                     "{} rejected process instance {}; authoritative instance is {}",
@@ -306,20 +302,20 @@ impl ExecutableStore {
         let previous_process = executables[index].process().cloned();
 
         let previous_authoritative =
-            authoritative_instances.insert(name.to_string(), process.instance_id_owned());
+            authoritative_instances.insert(id, process.instance_id_owned());
 
         executables[index].record_started_process(process);
 
-        if let Err(error) = Self::persist_snapshot(&self.runtime_path, &executables) {
+        if let Err(error) = self.persist_snapshot(&executables) {
             executables[index].recover_process_after_persist_failure(previous_process);
 
             match previous_authoritative {
                 Some(instance_id) => {
-                    authoritative_instances.insert(name.to_string(), instance_id);
+                    authoritative_instances.insert(id, instance_id);
                 }
 
                 None => {
-                    authoritative_instances.remove(name);
+                    authoritative_instances.remove(&id);
                 }
             }
 
@@ -354,20 +350,21 @@ impl ExecutableStore {
 
         let previous_process = executables[index].remove_process();
 
+        let id = executables[index].id();
         let previous_authoritative = if authoritative_instances
-            .get(name)
+            .get(&id)
             .is_some_and(|expected| expected == instance_id)
         {
-            authoritative_instances.remove(name)
+            authoritative_instances.remove(&id)
         } else {
             None
         };
 
-        if let Err(error) = Self::persist_snapshot(&self.runtime_path, &executables) {
+        if let Err(error) = self.persist_snapshot(&executables) {
             executables[index].recover_process_after_persist_failure(previous_process);
 
             if let Some(instance_id) = previous_authoritative {
-                authoritative_instances.insert(name.to_string(), instance_id);
+                authoritative_instances.insert(id, instance_id);
             }
 
             return Err(error);
@@ -429,7 +426,7 @@ impl ExecutableStore {
 
         executables[index].replace_update_state(Update::new(update_id, expected_size, sha256));
 
-        if let Err(error) = Self::persist_snapshot(&self.runtime_path, &executables) {
+        if let Err(error) = self.persist_snapshot(&executables) {
             executables[index].recover_update_after_persist_failure(previous);
             return Err(error);
         }
@@ -453,7 +450,7 @@ impl ExecutableStore {
 
         executables[index].replace_update_state(update);
 
-        if let Err(error) = Self::persist_snapshot(&self.runtime_path, &executables) {
+        if let Err(error) = self.persist_snapshot(&executables) {
             executables[index].recover_update_after_persist_failure(previous);
 
             return Err(error);
@@ -468,15 +465,9 @@ impl ExecutableStore {
         let executables = self
             .executables
             .lock()
-            .map_err(|_| "executables store lock poisoned".to_string())?
-            .clone();
+            .map_err(|_| "executables store lock poisoned".to_string())?;
 
-        let config = bincode_next::config::standard();
-
-        let encoded = encode_to_vec(&executables, config)
-            .map_err(|error| format!("failed to encode executables runtime: {error}"))?;
-
-        AtomicFile::write(&self.runtime_path, &encoded)
+        self.persist_snapshot(&executables)
     }
 
     fn record_promoted_process(&self, name: &str, process: Process) -> Result<(), String> {
@@ -489,11 +480,11 @@ impl ExecutableStore {
         self.authoritative_instances
             .lock()
             .map_err(|_| "authoritative instances lock poisoned".to_string())?
-            .insert(name.to_string(), process.instance_id_owned());
+            .insert(executables[index].id(), process.instance_id_owned());
 
         executables[index].record_started_process(process);
 
-        Self::persist_snapshot(&self.runtime_path, &executables)
+        self.persist_snapshot(&executables)
     }
 
     fn gate(&self) -> Result<MutexGuard<'_, ()>, String> {
@@ -517,13 +508,39 @@ impl ExecutableStore {
             .ok_or_else(|| format!("unknown executable: {name}"))
     }
 
-    fn persist_snapshot(runtime_path: &Path, executables: &[Executable]) -> Result<(), String> {
-        let config = bincode_next::config::standard();
+    /// Keeps the former state file before it is replaced. An existing copy is
+    /// never overwritten: if it differs, the migration is refused.
+    fn keep_pre_migration_copy(&self, bytes: &[u8]) -> Result<(), String> {
+        let mut name = self.runtime_path.as_os_str().to_os_string();
+        name.push(".pre-migration");
+        let copy_path = PathBuf::from(name);
 
-        let encoded = encode_to_vec(executables, config)
-            .map_err(|error| format!("failed to encode executables runtime: {error}"))?;
+        match fs::read(&copy_path) {
+            Ok(existing) if existing == bytes => Ok(()),
 
-        AtomicFile::write(runtime_path, &encoded)
+            Ok(_) => Err(format!(
+                "{} already exists with different content; refusing to migrate over it",
+                copy_path.display()
+            )),
+
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                AtomicFile::write(&copy_path, bytes)
+            }
+
+            Err(error) => Err(format!("failed to read {}: {error}", copy_path.display())),
+        }
+    }
+
+    fn persist_snapshot(&self, executables: &[Executable]) -> Result<(), String> {
+        let runtimes: Vec<ExecutableRuntime> = executables
+            .iter()
+            .map(Executable::runtime)
+            .chain(self.orphans.iter().cloned())
+            .collect();
+
+        let encoded = ExecutableRuntime::encode_state(&runtimes)?;
+
+        AtomicFile::write(&self.runtime_path, &encoded)
     }
 
     fn validate_definitions(executables: &[Executable]) -> Result<(), String> {
@@ -548,22 +565,91 @@ impl ExecutableStore {
         Ok(())
     }
 
-    fn merge_runtime_state(definitions: &mut [Executable], previous: Vec<Executable>) {
-        let previous: HashMap<String, Executable> = previous
+    /// Runtime state by `ExecutableId`. A missing file is a first start. The
+    /// former layout (definitions embedded) is migrated to runtime-only
+    /// state, and its bytes are returned so they can be kept. Any other
+    /// content is an error: it is never replaced by an empty state.
+    fn read_runtime_state(
+        runtime_path: &Path,
+    ) -> Result<(HashMap<ExecutableId, ExecutableRuntime>, Option<Vec<u8>>), String> {
+        let bytes = match fs::read(runtime_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((HashMap::new(), None));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to read {}: {error}",
+                    runtime_path.display()
+                ));
+            }
+        };
+        let (runtimes, migrated) = ExecutableRuntime::decode_state(&bytes).map_err(|error| {
+            format!(
+                "{}: {error}; left untouched, move it away to start from an empty state",
+                runtime_path.display()
+            )
+        })?;
+
+        if migrated {
+            println!(
+                "[Supervisor] migrating {} to runtime-only state",
+                runtime_path.display()
+            );
+        }
+
+        Ok((Self::by_id(runtimes), migrated.then_some(bytes)))
+    }
+
+    fn by_id(runtimes: Vec<ExecutableRuntime>) -> HashMap<ExecutableId, ExecutableRuntime> {
+        runtimes
             .into_iter()
-            .map(|executable| (executable.name_owned(), executable))
-            .collect();
+            .map(|runtime| (runtime.executable_id(), runtime))
+            .collect()
+    }
 
-        for definition in definitions {
-            let Some(old) = previous.get(definition.name()) else {
-                continue;
-            };
+    /// A runtime whose definition no longer exists cannot be tied to a binary
+    /// any more, so its process cannot be identified (no `/proc/<pid>/exe`
+    /// check) nor stopped. It is kept as long as it holds useful state: a
+    /// process whose pid still exists, or an update. Only a runtime with
+    /// neither is forgotten.
+    fn retain_orphans(runtimes: impl Iterator<Item = ExecutableRuntime>) -> Vec<ExecutableRuntime> {
+        let mut orphans = Vec::new();
 
-            if !definition.has_same_materialization(old) {
-                continue;
+        for runtime in runtimes {
+            let id = runtime.executable_id();
+
+            if let Some(process) = runtime.process() {
+                if ManagedProcess::pid_exists(process.pid()) {
+                    println!(
+                        "[Supervisor] keeping runtime state of undefined executable {id}: pid {} (instance {}, {}) still exists; without its definition it can be neither identified nor stopped",
+                        process.pid(),
+                        process.instance_id(),
+                        process.ws_address(),
+                    );
+
+                    orphans.push(runtime);
+
+                    continue;
+                }
+
+                println!(
+                    "[Supervisor] runtime of undefined executable {id}: pid {} is gone",
+                    process.pid()
+                );
             }
 
-            definition.merge_runtime_from(old);
+            if runtime.update().is_some() {
+                println!("[Supervisor] keeping update state of undefined executable {id}");
+
+                orphans.push(runtime.without_process());
+            } else {
+                println!(
+                    "[Supervisor] forgetting runtime state of undefined executable {id}: nothing left to keep"
+                );
+            }
         }
+
+        orphans
     }
 }

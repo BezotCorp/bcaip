@@ -1,13 +1,9 @@
-use crate::{
-    local_environment::LocalEnvironment, preparer_arguments::PreparerArguments,
-    supervisor_installer::SupervisorInstaller, systemd_integration::SystemdIntegration,
-};
+use crate::{local_environment::LocalEnvironment, systemd_integration::SystemdIntegration};
 
 pub(crate) struct LocalBcaipEnvironmentPreparer;
 
 impl LocalBcaipEnvironmentPreparer {
     pub(crate) fn run() -> Result<(), String> {
-        let arguments = PreparerArguments::parse()?;
         let environment = LocalEnvironment::discover()?;
 
         println!(
@@ -15,13 +11,7 @@ impl LocalBcaipEnvironmentPreparer {
             environment.bcaip_directory().display()
         );
 
-        SupervisorInstaller::install(
-            &environment,
-            arguments.supervisor(),
-            arguments.executables_bin(),
-        )?;
-
-        SystemdIntegration::install(&environment, arguments.supervisor_port())?;
+        SystemdIntegration::install(&environment)?;
 
         println!("[LocalBcaipEnvironmentPreparer] local BCAIP environment is prepared");
 

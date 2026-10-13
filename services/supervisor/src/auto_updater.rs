@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 const VALIDATION_INTERVAL: Duration = Duration::from_millis(250);
-const TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 
 /// Replaces the running supervisor by a freshly updated one. This process
 /// stays the only authority until the candidate is validated and promoted;
@@ -231,7 +231,7 @@ impl AutoUpdater {
         let mut rollback_errors = Vec::new();
 
         if let Some(process) = process {
-            if let Err(stop_error) = process.terminate(TERMINATE_TIMEOUT) {
+            if let Err(stop_error) = process.terminate(TERMINATE_GRACE) {
                 rollback_errors.push(stop_error);
             }
         }

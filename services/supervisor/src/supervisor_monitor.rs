@@ -1,16 +1,17 @@
-use crate::auto_updater::AutoUpdater;
-use crate::executable::Executable;
-use crate::executable_store::ExecutableStore;
-use crate::monitoring_state::MonitoringState;
-use crate::supervisor_config::SupervisorConfig;
-use crate::systemd::Systemd;
-use crate::ws_health::WsHealth;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+
 use uuid::Uuid;
+
+use crate::managed_process::ManagedProcess;
+use crate::{
+    auto_updater::AutoUpdater, executable::Executable, executable_launcher::ExecutableLauncher,
+    executable_store::ExecutableStore, monitoring_state::MonitoringState,
+    supervisor_config::SupervisorConfig, ws_health::WsHealth,
+};
 
 const FAILURE_LIMIT: u32 = 3;
 
@@ -20,6 +21,7 @@ pub(crate) struct SupervisorMonitor {
     stop: Arc<AtomicBool>,
     supervisor_address: SocketAddr,
     state: MonitoringState,
+    launcher: ExecutableLauncher,
 }
 
 impl SupervisorMonitor {
@@ -35,6 +37,7 @@ impl SupervisorMonitor {
             stop,
             supervisor_address,
             state: MonitoringState::new(FAILURE_LIMIT),
+            launcher: ExecutableLauncher::new(),
         }
     }
 
@@ -42,6 +45,35 @@ impl SupervisorMonitor {
         if let Err(error) = self.reconcile_runtime_processes() {
             println!(
                 "[Supervisor] failed to reconcile runtime processes: {}",
+                error
+            );
+        }
+
+        while !self.stop.load(Ordering::SeqCst) {
+            match self.after_bcaip_environment_setup_is_ready() {
+                Ok(true) => break,
+
+                Ok(false) => {
+                    thread::sleep(Duration::from_secs(1));
+                }
+
+                Err(error) => {
+                    println!(
+                        "[Supervisor] failed to check AfterBcaipEnvironmentSetup executables: {}",
+                        error
+                    );
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+
+        if let Err(error) = self.start_runtime_executables() {
+            println!(
+                "[Supervisor] failed to start Runtime executables: {}",
                 error
             );
         }
@@ -56,6 +88,8 @@ impl SupervisorMonitor {
                     continue;
                 }
             };
+
+            self.launcher.reap();
 
             if !self.supervise_once(&snapshot) {
                 return;
@@ -75,10 +109,50 @@ impl SupervisorMonitor {
                 continue;
             }
 
+            if !executable.starts_at_runtime() {
+                continue;
+            }
+
             self.supervise_executable(executable);
         }
 
         true
+    }
+
+    fn after_bcaip_environment_setup_is_ready(&self) -> Result<bool, String> {
+        for executable in self.store.snapshot()? {
+            if executable.start_phase()
+                != executables_manager::ExecutableStartPhase::AfterBcaipEnvironmentSetup
+            {
+                continue;
+            }
+
+            if !WsHealth::is_healthy(&executable) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn start_runtime_executables(&self) -> Result<(), String> {
+        for executable in self.store.snapshot()? {
+            if self.config.is_current_supervisor(&executable) {
+                continue;
+            }
+
+            if !executable.starts_at_runtime() {
+                continue;
+            }
+
+            if WsHealth::is_healthy(&executable) {
+                continue;
+            }
+
+            self.restart_executable(&executable, false);
+        }
+
+        Ok(())
     }
 
     fn supervise_executable(&mut self, executable: &Executable) {
@@ -124,7 +198,7 @@ impl SupervisorMonitor {
             if update_restart {
                 " after committed update"
             } else {
-                " after WebSocket health failure"
+                ""
             }
         );
 
@@ -143,7 +217,8 @@ impl SupervisorMonitor {
         }
 
         if let Err(error) =
-            Systemd::restart_transient(executable, &process_instance_id, self.supervisor_address)
+            self.launcher
+                .launch(executable, &process_instance_id, self.supervisor_address)
         {
             println!(
                 "[Supervisor] failed to restart {}: {}",
@@ -153,13 +228,16 @@ impl SupervisorMonitor {
         }
     }
 
+    /// Drops the persisted `Process` of an executable only once its process
+    /// is gone: a recorded pid is what lets a still-living process (started
+    /// by a previous supervisor) be stopped before a new one is launched.
     fn reconcile_runtime_processes(&self) -> Result<(), String> {
         for executable in self.store.snapshot()? {
             if self.config.is_current_supervisor(&executable) {
                 continue;
             }
 
-            let Some(instance_id) = executable.process_instance_id() else {
+            let Some(process) = executable.process() else {
                 continue;
             };
 
@@ -167,7 +245,23 @@ impl SupervisorMonitor {
                 continue;
             }
 
-            self.store.clear_process(executable.name(), instance_id)?;
+            if executable.starts_at_runtime() {
+                if let Err(error) = self.launcher.stop(&executable) {
+                    println!(
+                        "[Supervisor] failed to stop previous {} process, keeping its record: {}",
+                        executable.name(),
+                        error
+                    );
+
+                    continue;
+                }
+            } else if ManagedProcess::is_running_binary(process.pid(), &executable.path()) {
+                // Not started by the supervisor, so not stopped by it either.
+                continue;
+            }
+
+            self.store
+                .clear_process(executable.name(), process.instance_id())?;
         }
 
         Ok(())

@@ -2,11 +2,11 @@ use crate::authority_state::AuthorityState;
 use crate::executable::Executable;
 use crate::executable_store::ExecutableStore;
 use crate::handover_recovery::HandoverRecovery;
-use crate::process::Process;
 use crate::supervisor_config::SupervisorConfig;
 use crate::supervisor_monitor::SupervisorMonitor;
 use crate::systemd_notifier::SystemdNotifier;
 use crate::update_server::UpdateServer;
+use executables_manager::Process;
 use std::error::Error;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
@@ -58,6 +58,7 @@ impl Supervisor {
         }
 
         let self_definition = store.get(config.supervisor_name())?;
+
         let bind_address = config.bind_address(self_definition.as_ref())?;
         let listener = TcpListener::bind(bind_address)?;
         listener.set_nonblocking(true)?;

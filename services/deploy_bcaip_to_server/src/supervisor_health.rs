@@ -22,11 +22,12 @@ impl SupervisorHealth {
     pub(crate) fn check(
         descriptor: &ServerDeploymentDescriptor,
         supervisor_address: SocketAddr,
+        expected_executable: &str,
     ) -> Result<bool, String> {
         let local_port = Self::available_local_port()?;
         let mut tunnel = Self::open_tunnel(descriptor, supervisor_address, local_port)?;
 
-        let result = Self::check_local_port(local_port);
+        let result = Self::check_local_port(local_port, expected_executable);
 
         let _ = tunnel.kill();
         let _ = tunnel.wait();
@@ -71,7 +72,7 @@ impl SupervisorHealth {
             .map_err(|error| format!("failed to open SSH tunnel: {error}"))
     }
 
-    fn check_local_port(local_port: u16) -> Result<bool, String> {
+    fn check_local_port(local_port: u16, expected_executable: &str) -> Result<bool, String> {
         let address: SocketAddr = format!("127.0.0.1:{local_port}")
             .parse()
             .map_err(|error| format!("invalid local supervisor address: {error}"))?;
@@ -112,7 +113,7 @@ impl SupervisorHealth {
                     let response: SupervisorHealthResponse = ron::from_str(text.as_str())
                         .map_err(|error| format!("invalid supervisor Health response: {error}"))?;
 
-                    return Ok(response.is_healthy_supervisor());
+                    return Ok(response.is_healthy(expected_executable));
                 }
 
                 Ok(Message::Ping(payload)) => {
