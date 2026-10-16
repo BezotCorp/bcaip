@@ -5,8 +5,6 @@ mod initial_deployment;
 mod remote_server;
 mod service_builder;
 mod supervisor_health;
-mod supervisor_health_request;
-mod supervisor_health_response;
 
 use deployment::Deployment;
 use launch_ecosystem::ExecutionEnvironment;

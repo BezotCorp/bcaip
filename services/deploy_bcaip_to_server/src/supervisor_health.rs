@@ -5,13 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use executables_manager::{ExecutableManagementRequest, ExecutableManagementResponse};
 use servers_manager::Server;
 use ws_manager::{WsClient, WsMessage};
-
-use crate::{
-    supervisor_health_request::SupervisorHealthRequest,
-    supervisor_health_response::SupervisorHealthResponse,
-};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,7 +96,7 @@ impl SupervisorHealth {
             }
         };
 
-        let request = ron::ser::to_string(&SupervisorHealthRequest::Health)
+        let request = ron::ser::to_string(&ExecutableManagementRequest::Health)
             .map_err(|error| format!("failed to encode Health request: {error}"))?;
 
         connection
@@ -110,10 +106,17 @@ impl SupervisorHealth {
         loop {
             match connection.read() {
                 Ok(WsMessage::Text(text)) => {
-                    let response: SupervisorHealthResponse = ron::from_str(&text)
+                    let response: ExecutableManagementResponse = ron::from_str(&text)
                         .map_err(|error| format!("invalid supervisor Health response: {error}"))?;
 
-                    return Ok(response.is_healthy(expected_executable));
+                    return Ok(matches!(
+                        response,
+                        ExecutableManagementResponse::Healthy {
+                            executable,
+                            instance_id,
+                            ..
+                        } if executable == expected_executable && !instance_id.is_empty()
+                    ));
                 }
 
                 Ok(WsMessage::Ping(payload)) => {
