@@ -4,7 +4,8 @@ use executables_manager::{
     Executable, ExecutableStartPhase, ExecutablesManager, ExecutionEnvironment,
 };
 
-use crate::{file_writer::FileWriter, local_environment::LocalEnvironment};
+use crate::local_environment::LocalEnvironment;
+use files_manager::AtomicFile;
 
 const UNIT_PREFIX: &str = "bcaip-";
 const UNIT_SUFFIX: &str = ".service";
@@ -132,7 +133,7 @@ ExecutableId={}
             executable.id(),
         );
 
-        FileWriter::write(
+        AtomicFile::write(
             &environment
                 .service_directory()
                 .join(Self::unit_name(executable)),

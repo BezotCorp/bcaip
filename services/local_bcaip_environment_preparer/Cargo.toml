@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 executables_manager = { version = "0.1.0", path = "../../libraries/executables_manager" }
+files_manager = { version = "0.1.0", path = "../../libraries/files_manager" }

@@ -1,4 +1,3 @@
-mod atomic_file;
 mod server;
 mod server_deployment_status;
 mod server_id;
@@ -18,5 +17,3 @@ pub use server_index_entry::ServerIndexEntry;
 pub use server_name::ServerName;
 pub use server_paths::ServerPaths;
 pub use servers_manager::ServersManager;
-
-use atomic_file::AtomicFile;

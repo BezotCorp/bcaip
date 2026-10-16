@@ -1,4 +1,3 @@
-mod atomic_file;
 mod authority_state;
 mod begin_update_result;
 mod candidate_report;

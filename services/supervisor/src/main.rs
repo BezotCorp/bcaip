@@ -1,4 +1,3 @@
-mod atomic_file;
 mod auto_update_diagnostic;
 mod auto_update_failure;
 mod auto_update_phase;

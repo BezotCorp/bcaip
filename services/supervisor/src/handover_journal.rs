@@ -1,5 +1,5 @@
-use crate::atomic_file::AtomicFile;
 use crate::handover_phase::HandoverPhase;
+use files_manager::RonFile;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,10 +43,7 @@ impl HandoverJournal {
             return Ok(None);
         }
 
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        let mut journal: Self = ron::from_str(&source)
-            .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+        let mut journal: Self = RonFile::read(&path)?;
 
         journal.path = path;
 
@@ -102,9 +99,6 @@ impl HandoverJournal {
     }
 
     fn persist(&self) -> Result<(), String> {
-        let encoded = ron::ser::to_string(self)
-            .map_err(|error| format!("failed to encode handover journal: {error}"))?;
-
-        AtomicFile::write(&self.path, encoded.as_bytes())
+        RonFile::write(&self.path, self)
     }
 }

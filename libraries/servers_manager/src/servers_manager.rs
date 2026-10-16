@@ -4,11 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bincode_next::{Decode, Encode, decode_from_slice, encode_to_vec};
+use files_manager::{AtomicFile, BinaryFile, RonFile};
 use launch_ecosystem::ExecutionEnvironment;
 
 use crate::{
-    AtomicFile, Server, ServerDeploymentStatus, ServerId, ServerIndexByName, ServerIndexByUuid,
+    Server, ServerDeploymentStatus, ServerId, ServerIndexByName, ServerIndexByUuid,
     ServerIndexEntry, ServerName,
 };
 
@@ -76,11 +76,11 @@ impl ServersManager {
     }
 
     pub fn index_by_name(&self) -> Result<ServerIndexByName, String> {
-        self.read_binary(self.index_by_name_bin_path())
+        BinaryFile::read(&self.index_by_name_bin_path())
     }
 
     pub fn index_by_uuid(&self) -> Result<ServerIndexByUuid, String> {
-        self.read_binary(self.index_by_uuid_bin_path())
+        BinaryFile::read(&self.index_by_uuid_bin_path())
     }
 
     pub fn binary_files(&self) -> Result<Vec<PathBuf>, String> {
@@ -110,7 +110,7 @@ impl ServersManager {
             return Ok(None);
         }
 
-        self.read_binary(self.server_bin_path(id)).map(Some)
+        BinaryFile::read(&self.server_bin_path(id)).map(Some)
     }
 
     pub fn list(&self) -> Result<Vec<Server>, String> {
@@ -118,7 +118,7 @@ impl ServersManager {
         let mut servers = Vec::new();
 
         for id in index.ids() {
-            servers.push(self.read_binary(self.server_bin_path(id))?);
+            servers.push(BinaryFile::read(&self.server_bin_path(id))?);
         }
 
         Ok(servers)
@@ -158,8 +158,8 @@ impl ServersManager {
 
         by_name_entry.set_deployment_status(deployment_status);
 
-        self.write_binary(self.index_by_name_bin_path(), &by_name)?;
-        self.write_binary(self.index_by_uuid_bin_path(), &by_uuid)
+        BinaryFile::write(&self.index_by_name_bin_path(), &by_name)?;
+        BinaryFile::write(&self.index_by_uuid_bin_path(), &by_uuid)
     }
 
     pub fn set_deployment_status_by_name(
@@ -239,11 +239,7 @@ impl ServersManager {
 
             let id = ServerId::parse(id_text)?;
 
-            let content = fs::read_to_string(&path)
-                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-
-            let server: Server = ron::from_str(&content)
-                .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+            let server: Server = RonFile::read(&path)?;
 
             server.validate()?;
 
@@ -300,31 +296,31 @@ impl ServersManager {
 
             let path = self.server_bin_path(server.id());
 
-            files.push((path.clone(), Self::encode_binary(&path, server)?));
+            files.push((path.clone(), BinaryFile::encode(&path, server)?));
         }
 
         let index_by_name_ron = self.index_by_name_ron_path();
         files.push((
             index_by_name_ron.clone(),
-            Self::encode_ron(&index_by_name_ron, &by_name)?,
+            RonFile::encode(&index_by_name_ron, &by_name)?,
         ));
 
         let index_by_name_bin = self.index_by_name_bin_path();
         files.push((
             index_by_name_bin.clone(),
-            Self::encode_binary(&index_by_name_bin, &by_name)?,
+            BinaryFile::encode(&index_by_name_bin, &by_name)?,
         ));
 
         let index_by_uuid_ron = self.index_by_uuid_ron_path();
         files.push((
             index_by_uuid_ron.clone(),
-            Self::encode_ron(&index_by_uuid_ron, &by_uuid)?,
+            RonFile::encode(&index_by_uuid_ron, &by_uuid)?,
         ));
 
         let index_by_uuid_bin = self.index_by_uuid_bin_path();
         files.push((
             index_by_uuid_bin.clone(),
-            Self::encode_binary(&index_by_uuid_bin, &by_uuid)?,
+            BinaryFile::encode(&index_by_uuid_bin, &by_uuid)?,
         ));
 
         Ok(files)
@@ -339,7 +335,7 @@ impl ServersManager {
             return Ok(HashMap::new());
         }
 
-        let index: ServerIndexByUuid = self.read_binary(path)?;
+        let index: ServerIndexByUuid = BinaryFile::read(&path)?;
 
         Ok(index
             .entries()
@@ -422,50 +418,6 @@ impl ServersManager {
         }
 
         Ok(stale)
-    }
-
-    fn read_binary<T>(&self, path: PathBuf) -> Result<T, String>
-    where
-        T: Decode<()>,
-    {
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-
-        let (value, consumed) = decode_from_slice::<T, _>(&bytes, bincode_next::config::standard())
-            .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
-
-        if consumed != bytes.len() {
-            return Err(format!("{} contains trailing binary data", path.display()));
-        }
-
-        Ok(value)
-    }
-
-    fn write_binary<T>(&self, path: PathBuf, value: &T) -> Result<(), String>
-    where
-        T: Encode,
-    {
-        let bytes = Self::encode_binary(&path, value)?;
-
-        AtomicFile::write(&path, &bytes)
-    }
-
-    fn encode_binary<T>(path: &Path, value: &T) -> Result<Vec<u8>, String>
-    where
-        T: Encode,
-    {
-        encode_to_vec(value, bincode_next::config::standard())
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))
-    }
-
-    fn encode_ron<T>(path: &Path, value: &T) -> Result<Vec<u8>, String>
-    where
-        T: serde::Serialize,
-    {
-        let content = ron::ser::to_string_pretty(value, ron::ser::PrettyConfig::default())
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
-
-        Ok(content.into_bytes())
     }
 
     fn server_bin_path(&self, id: ServerId) -> PathBuf {

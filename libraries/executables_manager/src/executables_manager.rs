@@ -5,10 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bincode_next::{Decode, Encode, decode_from_slice, encode_to_vec};
+use files_manager::{AtomicFile, BinaryFile, RonFile};
 
 use crate::{
-    atomic_file::AtomicFile, executable::Executable, executable_id::ExecutableId,
+    executable::Executable, executable_id::ExecutableId,
     executable_index_by_name::ExecutableIndexByName,
     executable_index_by_uuid::ExecutableIndexByUuid, executable_name::ExecutableName,
     executable_role::ExecutableRole, executable_start_phase::ExecutableStartPhase,
@@ -118,17 +118,14 @@ impl ExecutablesManager {
     pub fn binary_files(&self) -> Result<Vec<PathBuf>, String> {
         let mut files = vec![self.index_by_name_bin_path(), self.index_by_uuid_bin_path()];
 
-        for id in self
-            .read_binary::<ExecutableIndexByUuid>(self.index_by_uuid_bin_path())?
-            .ids()
-        {
+        for id in BinaryFile::read::<ExecutableIndexByUuid>(&self.index_by_uuid_bin_path())?.ids() {
             files.push(self.executable_bin_path(id));
         }
 
         Ok(files)
     }
     pub fn get_by_name(&self, name: &ExecutableName) -> Result<Option<Executable>, String> {
-        let index: ExecutableIndexByName = self.read_binary(self.index_by_name_bin_path())?;
+        let index: ExecutableIndexByName = BinaryFile::read(&self.index_by_name_bin_path())?;
 
         let Some(id) = index.get(name) else {
             return Ok(None);
@@ -138,21 +135,21 @@ impl ExecutablesManager {
     }
 
     pub fn get_by_id(&self, id: ExecutableId) -> Result<Option<Executable>, String> {
-        let index: ExecutableIndexByUuid = self.read_binary(self.index_by_uuid_bin_path())?;
+        let index: ExecutableIndexByUuid = BinaryFile::read(&self.index_by_uuid_bin_path())?;
 
         if index.get(id).is_none() {
             return Ok(None);
         }
 
-        self.read_binary(self.executable_bin_path(id)).map(Some)
+        BinaryFile::read(&self.executable_bin_path(id)).map(Some)
     }
 
     pub fn list(&self) -> Result<Vec<Executable>, String> {
-        let index: ExecutableIndexByUuid = self.read_binary(self.index_by_uuid_bin_path())?;
+        let index: ExecutableIndexByUuid = BinaryFile::read(&self.index_by_uuid_bin_path())?;
 
         index
             .ids()
-            .map(|id| self.read_binary(self.executable_bin_path(id)))
+            .map(|id| BinaryFile::read(&self.executable_bin_path(id)))
             .collect()
     }
 
@@ -176,7 +173,7 @@ impl ExecutablesManager {
             }
         }
 
-        self.write_ron(self.executable_ron_path(executable.id()), executable)?;
+        RonFile::write(&self.executable_ron_path(executable.id()), executable)?;
         self.materialize()
     }
 
@@ -266,11 +263,7 @@ impl ExecutablesManager {
 
             let id = ExecutableId::parse(id_text)?;
 
-            let source = fs::read_to_string(&path)
-                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-
-            let executable: Executable = ron::from_str(&source)
-                .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+            let executable: Executable = RonFile::read(&path)?;
 
             executable.validate()?;
 
@@ -327,25 +320,25 @@ impl ExecutablesManager {
 
             files.push((
                 self.executable_bin_path(executable.id()),
-                Self::encode_binary(&self.executable_bin_path(executable.id()), executable)?,
+                BinaryFile::encode(&self.executable_bin_path(executable.id()), executable)?,
             ));
         }
 
         files.push((
             self.index_by_name_ron_path(),
-            Self::encode_ron(&self.index_by_name_ron_path(), &by_name)?,
+            RonFile::encode(&self.index_by_name_ron_path(), &by_name)?,
         ));
         files.push((
             self.index_by_name_bin_path(),
-            Self::encode_binary(&self.index_by_name_bin_path(), &by_name)?,
+            BinaryFile::encode(&self.index_by_name_bin_path(), &by_name)?,
         ));
         files.push((
             self.index_by_uuid_ron_path(),
-            Self::encode_ron(&self.index_by_uuid_ron_path(), &by_uuid)?,
+            RonFile::encode(&self.index_by_uuid_ron_path(), &by_uuid)?,
         ));
         files.push((
             self.index_by_uuid_bin_path(),
-            Self::encode_binary(&self.index_by_uuid_bin_path(), &by_uuid)?,
+            BinaryFile::encode(&self.index_by_uuid_bin_path(), &by_uuid)?,
         ));
 
         Ok(files)
@@ -454,46 +447,5 @@ impl ExecutablesManager {
     fn index_by_uuid_bin_path(&self) -> PathBuf {
         self.environment
             .resolve(&self.directory.join(format!("{INDEX_BY_UUID}.bin")))
-    }
-
-    fn write_ron<T>(&self, path: PathBuf, value: &T) -> Result<(), String>
-    where
-        T: serde::Serialize,
-    {
-        AtomicFile::write(&path, &Self::encode_ron(&path, value)?)
-    }
-
-    fn encode_ron<T>(path: &Path, value: &T) -> Result<Vec<u8>, String>
-    where
-        T: serde::Serialize,
-    {
-        ron::ser::to_string_pretty(value, ron::ser::PrettyConfig::default())
-            .map(String::into_bytes)
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))
-    }
-
-    fn encode_binary<T>(path: &Path, value: &T) -> Result<Vec<u8>, String>
-    where
-        T: Encode,
-    {
-        encode_to_vec(value, bincode_next::config::standard())
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))
-    }
-
-    fn read_binary<T>(&self, path: PathBuf) -> Result<T, String>
-    where
-        T: Decode<()>,
-    {
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-
-        let (value, consumed) = decode_from_slice::<T, _>(&bytes, bincode_next::config::standard())
-            .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
-
-        if consumed != bytes.len() {
-            return Err(format!("{} contains trailing bytes", path.display()));
-        }
-
-        Ok(value)
     }
 }

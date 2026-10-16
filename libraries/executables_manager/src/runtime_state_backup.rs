@@ -1,5 +1,5 @@
 use crate::ExecutableRuntime;
-use crate::atomic_file::AtomicFile;
+use files_manager::AtomicFile;
 use std::fs;
 use std::path::{Path, PathBuf};
 

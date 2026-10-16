@@ -1,4 +1,3 @@
-use crate::atomic_file::AtomicFile;
 use crate::handover_journal::HandoverJournal;
 use crate::managed_process::ManagedProcess;
 use crate::runtime_handover::RuntimeHandover;
@@ -10,6 +9,7 @@ use executables_manager::Process;
 use executables_manager::RuntimeStateBackup;
 use executables_manager::Update;
 use executables_manager::{ExecutableId, ExecutablesManager, ExecutionEnvironment};
+use files_manager::AtomicFile;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;

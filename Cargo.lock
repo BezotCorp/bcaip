@@ -194,6 +194,7 @@ name = "executables_manager"
 version = "0.1.0"
 dependencies = [
  "bincode-next",
+ "files_manager",
  "launch_ecosystem",
  "ron",
  "serde",
@@ -313,6 +314,7 @@ name = "local_bcaip_environment_preparer"
 version = "0.1.0"
 dependencies = [
  "executables_manager",
+ "files_manager",
 ]
 
 [[package]]
@@ -503,6 +505,7 @@ name = "servers_manager"
 version = "0.1.0"
 dependencies = [
  "bincode-next",
+ "files_manager",
  "launch_ecosystem",
  "ron",
  "serde",
@@ -552,6 +555,7 @@ dependencies = [
  "bincode-next",
  "ctrlc",
  "executables_manager",
+ "files_manager",
  "ron",
  "rustix",
  "serde",

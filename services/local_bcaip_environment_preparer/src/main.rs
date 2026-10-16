@@ -1,4 +1,3 @@
-mod file_writer;
 mod local_bcaip_environment_preparer;
 mod local_environment;
 mod systemd_integration;
