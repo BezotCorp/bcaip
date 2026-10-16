@@ -1,5 +1,4 @@
 target/
-*.local.*
-/data/executables.bin
+*.local*
 /data/servers/*.bin
 /data/executables/*.bin

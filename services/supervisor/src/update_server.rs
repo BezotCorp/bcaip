@@ -1,23 +1,24 @@
-use crate::begin_update_result::BeginUpdateResult;
-use crate::candidate_report::CandidateReport;
-use crate::executable::Executable;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::net::SocketAddr;
+use std::path::Path;
+
 use crate::executable_backup::ExecutableBackup;
-use crate::executable_management_request::ExecutableManagementRequest;
-use crate::executable_management_response::ExecutableManagementResponse;
 use crate::executable_store::ExecutableStore;
 use crate::handover_journal::HandoverJournal;
 use crate::handover_phase::HandoverPhase;
 use crate::supervisor_config::SupervisorConfig;
 use crate::systemd_notifier::SystemdNotifier;
-use executables_manager::Process;
-use executables_manager::Update;
+use executables_manager::BeginUpdateResult;
+use executables_manager::CandidateReport;
+use executables_manager::Executable;
+use executables_manager::UpdateFile;
+use executables_manager::{
+    ExecutableManagementRequest, ExecutableManagementResponse, Process, Update,
+};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
-use tungstenite::{Message, WebSocket, accept};
 use uuid::{Uuid, Version};
+use ws_manager::{WsConnection, WsMessage};
 
 pub(crate) struct UpdateServer<'a> {
     store: &'a ExecutableStore,
@@ -41,41 +42,41 @@ impl<'a> UpdateServer<'a> {
         }
     }
 
-    pub(crate) fn handle_connection(&self, stream: TcpStream) -> Result<(), String> {
-        let mut socket =
-            accept(stream).map_err(|error| format!("WebSocket handshake failed: {error}"))?;
-
-        let message = socket
+    pub(crate) fn handle_connection(&self, mut connection: WsConnection) -> Result<(), String> {
+        let message = connection
             .read()
             .map_err(|error| format!("failed to read executable management request: {error}"))?;
 
         let text = match message {
-            Message::Ping(payload) => {
-                socket
-                    .send(Message::Pong(payload))
+            WsMessage::Ping(payload) => {
+                connection
+                    .send_pong(&payload)
                     .map_err(|error| format!("failed to send supervisor Pong: {error}"))?;
 
                 return Ok(());
             }
 
-            Message::Text(text) => text,
+            WsMessage::Text(text) => text,
 
             _ => {
-                Self::send_failure(&mut socket, "first supervisor message must be RON text")?;
+                Self::send_failure(&mut connection, "first supervisor message must be RON text")?;
 
                 return Ok(());
             }
         };
 
-        let request: ExecutableManagementRequest = ron::from_str(text.as_str())
+        let request: ExecutableManagementRequest = ron::from_str(&text)
             .map_err(|error| format!("invalid executable management request: {error}"))?;
 
-        self.handle_request(&mut socket, request)
+        self.handle_request(&mut connection, request)
     }
 
-    pub(crate) fn reconcile_all(store: &ExecutableStore) -> Result<(), String> {
+    pub(crate) fn reconcile_all(
+        store: &ExecutableStore,
+        executable_root: &Path,
+    ) -> Result<(), String> {
         for executable in store.snapshot()? {
-            Self::reconcile_pending(&executable, store)?;
+            Self::reconcile_pending(&executable, store, executable_root)?;
         }
 
         Ok(())
@@ -83,7 +84,7 @@ impl<'a> UpdateServer<'a> {
 
     fn handle_request(
         &self,
-        socket: &mut WebSocket<TcpStream>,
+        socket: &mut WsConnection,
         request: ExecutableManagementRequest,
     ) -> Result<(), String> {
         match request {
@@ -291,9 +292,13 @@ impl<'a> UpdateServer<'a> {
             .inspect_err(|_| self.store.release_authority())
     }
 
-    fn reconcile_pending(executable: &Executable, store: &ExecutableStore) -> Result<(), String> {
+    fn reconcile_pending(
+        executable: &Executable,
+        store: &ExecutableStore,
+        executable_root: &Path,
+    ) -> Result<(), String> {
         let Some(mut update) = store
-            .get(executable.name())?
+            .get(executable.name().as_str())?
             .and_then(|value| value.update_owned())
         else {
             return Ok(());
@@ -303,19 +308,19 @@ impl<'a> UpdateServer<'a> {
             return Ok(());
         }
 
-        let target = executable.path();
-        let temp = Self::temporary_update_path(&target, update.update_id())?;
+        let target = executable.path(executable_root);
+        let temp = UpdateFile::temporary_path(&target, update.update_id())?;
 
-        if Self::file_matches(&target, update.expected_size(), update.sha256())? {
+        if UpdateFile::matches(&target, update.expected_size(), update.sha256())? {
             let parent = target
                 .parent()
                 .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
 
-            Self::sync_directory(parent)?;
+            UpdateFile::sync_directory(parent)?;
 
             update.commit();
 
-            store.set_update(executable.name(), update)?;
+            store.set_update(executable.name().as_str(), update)?;
 
             let _ = fs::remove_file(temp);
 
@@ -326,12 +331,12 @@ impl<'a> UpdateServer<'a> {
 
         update.fail("supervisor restarted before the update committed".to_string());
 
-        store.set_update(executable.name(), update)
+        store.set_update(executable.name().as_str(), update)
     }
 
     fn receive_update(
         &self,
-        socket: &mut WebSocket<TcpStream>,
+        socket: &mut WsConnection,
         executable: &Executable,
         update_id: String,
         expected_size: u64,
@@ -339,7 +344,7 @@ impl<'a> UpdateServer<'a> {
     ) -> Result<(), String> {
         let mut update = Update::new(update_id.clone(), expected_size, sha256.clone());
 
-        let target = executable.path();
+        let target = executable.path(self.config.executable_root());
 
         if !target.is_file() {
             return self.fail_reserved_update(
@@ -376,7 +381,7 @@ impl<'a> UpdateServer<'a> {
             }
         };
 
-        let temp = match Self::temporary_update_path(&target, &update_id) {
+        let temp = match UpdateFile::temporary_path(&target, &update_id) {
             Ok(temp) => temp,
 
             Err(error) => {
@@ -419,7 +424,7 @@ impl<'a> UpdateServer<'a> {
 
             update.fail(error.clone());
 
-            let _ = self.store.set_update(executable.name(), update);
+            let _ = self.store.set_update(executable.name().as_str(), update);
 
             return Err(error);
         }
@@ -442,14 +447,14 @@ impl<'a> UpdateServer<'a> {
             };
 
             match message {
-                Message::Binary(payload) => {
+                WsMessage::Binary(payload) => {
                     let payload_size = payload.len() as u64;
 
                     if let Err(error) = update.receive(payload_size) {
                         return self.fail_transfer(socket, executable, update, &temp, error);
                     }
 
-                    if let Err(error) = file.write_all(payload.as_ref()) {
+                    if let Err(error) = file.write_all(&payload) {
                         return self.fail_transfer(
                             socket,
                             executable,
@@ -459,11 +464,11 @@ impl<'a> UpdateServer<'a> {
                         );
                     }
 
-                    hasher.update(payload.as_ref());
+                    hasher.update(&payload);
                 }
 
-                Message::Ping(payload) => {
-                    if let Err(error) = socket.send(Message::Pong(payload)) {
+                WsMessage::Ping(payload) => {
+                    if let Err(error) = socket.send_pong(&payload) {
                         return self.fail_transfer(
                             socket,
                             executable,
@@ -474,7 +479,7 @@ impl<'a> UpdateServer<'a> {
                     }
                 }
 
-                Message::Close(_) => {
+                WsMessage::Close => {
                     let received_size = update.received_size();
 
                     return self.fail_transfer(
@@ -575,10 +580,10 @@ impl<'a> UpdateServer<'a> {
          * If this fails we deliberately KEEP Pending. Startup
          * reconciliation hashes the target and retries the directory sync.
          */
-        if let Err(error) = Self::sync_directory(parent) {
+        if let Err(error) = UpdateFile::sync_directory(parent) {
             update.keep_pending_with_error(error.clone());
 
-            let _ = self.store.set_update(executable.name(), update);
+            let _ = self.store.set_update(executable.name().as_str(), update);
 
             Self::send_failure(socket, &error)?;
 
@@ -587,7 +592,7 @@ impl<'a> UpdateServer<'a> {
 
         update.commit();
 
-        if let Err(error) = self.store.set_update(executable.name(), update) {
+        if let Err(error) = self.store.set_update(executable.name().as_str(), update) {
             Self::send_failure(
                 socket,
                 &format!("binary committed but committed state could not be persisted: {error}"),
@@ -604,21 +609,21 @@ impl<'a> UpdateServer<'a> {
             },
         )?;
 
-        let _ = socket.close(None);
+        let _ = socket.close();
 
         Ok(())
     }
 
     fn fail_reserved_update(
         &self,
-        socket: &mut WebSocket<TcpStream>,
+        socket: &mut WsConnection,
         executable: &Executable,
         mut update: Update,
         error: String,
     ) -> Result<(), String> {
         update.fail(error.clone());
 
-        let _ = self.store.set_update(executable.name(), update);
+        let _ = self.store.set_update(executable.name().as_str(), update);
 
         let _ = Self::send_failure(socket, &error);
 
@@ -627,7 +632,7 @@ impl<'a> UpdateServer<'a> {
 
     fn fail_transfer(
         &self,
-        socket: &mut WebSocket<TcpStream>,
+        socket: &mut WsConnection,
         executable: &Executable,
         mut update: Update,
         temp: &Path,
@@ -637,14 +642,14 @@ impl<'a> UpdateServer<'a> {
 
         update.fail(error.clone());
 
-        let _ = self.store.set_update(executable.name(), update);
+        let _ = self.store.set_update(executable.name().as_str(), update);
 
         let _ = Self::send_failure(socket, &error);
 
         Ok(())
     }
 
-    fn send_failure(socket: &mut WebSocket<TcpStream>, message: &str) -> Result<(), String> {
+    fn send_failure(socket: &mut WsConnection, message: &str) -> Result<(), String> {
         Self::send_response(
             socket,
             &ExecutableManagementResponse::Failure {
@@ -654,14 +659,14 @@ impl<'a> UpdateServer<'a> {
     }
 
     fn send_response(
-        socket: &mut WebSocket<TcpStream>,
+        socket: &mut WsConnection,
         response: &ExecutableManagementResponse,
     ) -> Result<(), String> {
         let serialized = ron::ser::to_string(response)
             .map_err(|error| format!("failed to encode executable management response: {error}"))?;
 
         socket
-            .send(Message::Text(serialized.into()))
+            .send_text(&serialized)
             .map_err(|error| format!("failed to send executable management response: {error}"))
     }
 
@@ -693,66 +698,5 @@ impl<'a> UpdateServer<'a> {
         }
 
         Ok(())
-    }
-
-    fn temporary_update_path(target: &Path, update_id: &str) -> Result<PathBuf, String> {
-        let parent = target
-            .parent()
-            .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
-
-        let file_name = target
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| format!("invalid executable filename: {}", target.display()))?;
-
-        Ok(parent.join(format!(".{file_name}.{update_id}.update.tmp")))
-    }
-
-    fn file_matches(
-        path: &Path,
-        expected_size: u64,
-        expected_sha256: &str,
-    ) -> Result<bool, String> {
-        if !path.is_file() {
-            return Ok(false);
-        }
-
-        let mut file = fs::File::open(path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-
-        let mut hasher = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        let mut size = 0_u64;
-
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-
-            if read == 0 {
-                break;
-            }
-
-            size = size
-                .checked_add(read as u64)
-                .ok_or_else(|| "file size overflow".to_string())?;
-
-            hasher.update(&buffer[..read]);
-        }
-
-        let digest = hasher.finalize();
-
-        let actual_sha256 = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-
-        Ok(size == expected_size && actual_sha256.eq_ignore_ascii_case(expected_sha256))
-    }
-
-    fn sync_directory(path: &Path) -> Result<(), String> {
-        fs::File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("failed to sync directory {}: {error}", path.display()))
     }
 }

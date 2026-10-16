@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// What a candidate states about itself; the authoritative supervisor
 /// compares it with its own view before promoting.
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct CandidateReport {
+pub struct CandidateReport {
     executable: String,
     instance_id: String,
     applied_update_id: Option<String>,
@@ -12,7 +12,7 @@ pub(crate) struct CandidateReport {
 }
 
 impl CandidateReport {
-    pub(crate) fn new(
+    pub fn new(
         executable: String,
         instance_id: String,
         applied_update_id: Option<String>,
@@ -28,7 +28,7 @@ impl CandidateReport {
         }
     }
 
-    pub(crate) fn check(
+    pub fn check(
         &self,
         executable: &str,
         instance_id: &str,

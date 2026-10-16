@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 #[derive(Deserialize, Serialize, Debug)]
-pub(crate) enum ExecutableManagementRequest {
+pub enum ExecutableManagementRequest {
     Health,
 
     CandidateReport,

@@ -3,11 +3,11 @@ use crate::auto_update_failure::AutoUpdateFailure;
 use crate::auto_update_phase::AutoUpdatePhase;
 use crate::candidate_client::CandidateClient;
 use crate::candidate_process::CandidateProcess;
-use crate::executable::Executable;
 use crate::executable_backup::ExecutableBackup;
 use crate::executable_store::ExecutableStore;
 use crate::runtime_handover::RuntimeHandover;
 use crate::supervisor_config::SupervisorConfig;
+use executables_manager::Executable;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,11 +52,14 @@ impl AutoUpdater {
             .to_string();
         let candidate = CandidateClient::new(
             self.config.candidate_bind_address(),
-            executable.name(),
+            executable.name().as_str(),
             &Uuid::now_v7().to_string(),
         );
 
-        let mut handover = match self.store.begin_handover(executable.name(), &update_id) {
+        let mut handover = match self
+            .store
+            .begin_handover(executable.name().as_str(), &update_id)
+        {
             Ok(handover) => handover,
 
             Err(error) => {
@@ -80,7 +83,7 @@ impl AutoUpdater {
                 self.persist_diagnostic(
                     AutoUpdateDiagnostic::new(
                         &update_id,
-                        executable.name(),
+                        executable.name().as_str(),
                         AutoUpdatePhase::Promoted,
                     )
                     .with_candidate(
@@ -114,6 +117,7 @@ impl AutoUpdater {
     ) -> Result<(), AutoUpdateFailure> {
         let spawned = CandidateProcess::spawn(
             executable,
+            self.config.executable_root(),
             candidate.instance_id(),
             candidate.address(),
             self.supervisor_address,
@@ -127,14 +131,14 @@ impl AutoUpdater {
         self.persist_diagnostic(
             AutoUpdateDiagnostic::new(
                 update_id,
-                executable.name(),
+                executable.name().as_str(),
                 AutoUpdatePhase::CandidateLaunched,
             )
             .with_candidate(Some(pid), candidate.instance_id())
             .with_runtime_backup(handover.backup_path()),
         );
 
-        self.validate_candidate(executable.name(), update_id, candidate)?;
+        self.validate_candidate(executable.name().as_str(), update_id, candidate)?;
 
         match handover.is_untouched() {
             Ok(true) => {}
@@ -218,9 +222,10 @@ impl AutoUpdater {
         let candidate_pid = process.as_ref().map(CandidateProcess::pid);
         let cause = failure.phase();
         let error = failure.into_error();
-        let mut diagnostic = AutoUpdateDiagnostic::new(update_id, executable.name(), cause.clone())
-            .with_candidate(candidate_pid, candidate.instance_id())
-            .with_error(error.clone());
+        let mut diagnostic =
+            AutoUpdateDiagnostic::new(update_id, executable.name().as_str(), cause.clone())
+                .with_candidate(candidate_pid, candidate.instance_id())
+                .with_error(error.clone());
 
         if let Some(handover) = &handover {
             diagnostic = diagnostic.with_runtime_backup(handover.backup_path());
@@ -245,17 +250,20 @@ impl AutoUpdater {
         }
 
         if let Err(binary_error) =
-            ExecutableBackup::of(&executable.path()).and_then(|backup| backup.restore())
+            ExecutableBackup::of(&executable.path(self.config.executable_root()))
+                .and_then(|backup| backup.restore())
         {
             rollback_errors.push(binary_error);
         }
 
         let rejection = format!("supervisor candidate rejected ({cause:?}): {error}");
         let rejected = match &handover {
-            Some(handover) => handover.reject_update(executable.name(), update_id, rejection),
+            Some(handover) => {
+                handover.reject_update(executable.name().as_str(), update_id, rejection)
+            }
             None => self
                 .store
-                .reject_update(executable.name(), update_id, rejection),
+                .reject_update(executable.name().as_str(), update_id, rejection),
         };
 
         if let Err(reject_error) = rejected {
@@ -286,10 +294,11 @@ impl AutoUpdater {
         } else {
             AutoUpdatePhase::RollbackFailed
         };
-        let mut diagnostic = AutoUpdateDiagnostic::new(update_id, executable.name(), phase)
-            .with_cause(cause)
-            .with_candidate(candidate_pid, candidate.instance_id())
-            .with_error(error);
+        let mut diagnostic =
+            AutoUpdateDiagnostic::new(update_id, executable.name().as_str(), phase)
+                .with_cause(cause)
+                .with_candidate(candidate_pid, candidate.instance_id())
+                .with_error(error);
 
         if !rollback_errors.is_empty() {
             diagnostic = diagnostic.with_rollback_error(rollback_errors.join("; "));

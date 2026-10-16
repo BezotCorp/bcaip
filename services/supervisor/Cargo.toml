@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-uuid = { version = "1", features = ["v7"] }
-bincode-next = "3.1.1"
-ron = "0.12.2"
-serde = { version = "1.0.229", features = ["derive"] }
-sha2 = "0.10.9"
+uuid.workspace = true
+bincode-next.workspace = true
+ron.workspace = true
+serde.workspace = true
+sha2.workspace = true
 ctrlc = { version = "3.4", features = ["termination"] }
-tungstenite = "0.28"
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "time"] }
 executables_manager = { version = "0.1.0", path = "../../libraries/executables_manager" }
+ws_manager = { version = "0.1.0", path = "../../libraries/ws_manager" }

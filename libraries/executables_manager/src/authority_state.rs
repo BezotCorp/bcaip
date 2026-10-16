@@ -5,20 +5,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const LOCK_FILE_NAME: &str = "supervisor.authority.lock";
+const LOCK_FILE_NAME: &str = "bcaip.authority.lock";
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Write authority over the runtime state. A supervisor is the writer only
-/// while it holds the exclusive OS lock, which the kernel releases if the
-/// process dies, so two writers can never coexist.
-pub(crate) struct AuthorityState {
+/// Write authority over executable runtime state.
+///
+/// Authority is held only while this process owns the exclusive OS lock.
+/// The kernel releases the lock if the process dies, preventing concurrent
+/// writers from holding authority at the same time.
+pub struct AuthorityState {
     lock_path: PathBuf,
     lock: Mutex<Option<File>>,
     writer: AtomicBool,
 }
 
 impl AuthorityState {
-    pub(crate) fn writer(data_directory: &Path) -> Result<Self, String> {
+    pub fn writer(data_directory: &Path) -> Result<Self, String> {
         let state = Self::candidate(data_directory);
 
         state.acquire(Duration::ZERO)?;
@@ -26,7 +28,7 @@ impl AuthorityState {
         Ok(state)
     }
 
-    pub(crate) fn candidate(data_directory: &Path) -> Self {
+    pub fn candidate(data_directory: &Path) -> Self {
         Self {
             lock_path: data_directory.join(LOCK_FILE_NAME),
             lock: Mutex::new(None),
@@ -34,11 +36,11 @@ impl AuthorityState {
         }
     }
 
-    pub(crate) fn can_write(&self) -> bool {
+    pub fn can_write(&self) -> bool {
         self.writer.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn acquire(&self, timeout: Duration) -> Result<(), String> {
+    pub fn acquire(&self, timeout: Duration) -> Result<(), String> {
         let mut lock = self
             .lock
             .lock()
@@ -66,7 +68,7 @@ impl AuthorityState {
 
                 Err(TryLockError::WouldBlock) => {
                     return Err(format!(
-                        "another supervisor holds the write authority ({})",
+                        "another process holds the write authority ({})",
                         self.lock_path.display()
                     ));
                 }
@@ -86,7 +88,7 @@ impl AuthorityState {
         Ok(())
     }
 
-    pub(crate) fn release(&self) {
+    pub fn release(&self) {
         self.writer.store(false, Ordering::SeqCst);
 
         if let Ok(mut lock) = self.lock.lock() {

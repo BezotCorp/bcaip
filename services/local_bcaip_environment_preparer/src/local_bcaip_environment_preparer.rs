@@ -8,7 +8,7 @@ impl LocalBcaipEnvironmentPreparer {
 
         println!(
             "[LocalBcaipEnvironmentPreparer] preparing BCAIP in {}",
-            environment.bcaip_directory().display()
+            environment.executable_root_directory().display()
         );
 
         SystemdIntegration::install(&environment)?;

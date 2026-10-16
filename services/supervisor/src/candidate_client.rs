@@ -1,9 +1,9 @@
-use crate::candidate_report::CandidateReport;
-use crate::executable_management_request::ExecutableManagementRequest;
-use crate::executable_management_response::ExecutableManagementResponse;
-use std::net::{SocketAddr, TcpStream};
+use executables_manager::{
+    CandidateReport, ExecutableManagementRequest, ExecutableManagementResponse,
+};
+use std::net::SocketAddr;
 use std::time::Duration;
-use tungstenite::{Message, client};
+use ws_manager::{WsClient, WsMessage};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -58,37 +58,32 @@ impl CandidateClient {
         request: ExecutableManagementRequest,
         timeout: Duration,
     ) -> Result<ExecutableManagementResponse, String> {
-        let stream = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT)
-            .map_err(|error| format!("failed to connect to candidate: {error}"))?;
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(|error| format!("failed to set candidate read timeout: {error}"))?;
-        stream
-            .set_write_timeout(Some(CONNECT_TIMEOUT))
-            .map_err(|error| format!("failed to set candidate write timeout: {error}"))?;
+        let client = WsClient::new(self.address);
 
-        let (mut socket, _) = client(format!("ws://{}/", self.address), stream)
-            .map_err(|error| format!("candidate WebSocket handshake failed: {error}"))?;
+        let mut connection = client
+            .connect(CONNECT_TIMEOUT, Some(timeout), Some(CONNECT_TIMEOUT))
+            .map_err(|error| format!("failed to connect to candidate: {error}"))?;
+
         let request = ron::ser::to_string(&request)
             .map_err(|error| format!("failed to encode candidate request: {error}"))?;
 
-        socket
-            .send(Message::Text(request.into()))
+        connection
+            .send_text(&request)
             .map_err(|error| format!("failed to send candidate request: {error}"))?;
 
         loop {
-            match socket
+            match connection
                 .read()
                 .map_err(|error| format!("failed to read candidate response: {error}"))?
             {
-                Message::Text(text) => {
-                    return ron::from_str(text.as_str())
+                WsMessage::Text(text) => {
+                    return ron::from_str(&text)
                         .map_err(|error| format!("invalid candidate response: {error}"));
                 }
 
-                Message::Ping(payload) => {
-                    socket
-                        .send(Message::Pong(payload))
+                WsMessage::Ping(payload) => {
+                    connection
+                        .send_pong(&payload)
                         .map_err(|error| format!("failed to answer candidate Ping: {error}"))?;
                 }
 

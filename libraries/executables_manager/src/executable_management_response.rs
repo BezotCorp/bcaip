@@ -3,7 +3,7 @@ use crate::executable::Executable;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Debug)]
-pub(crate) enum ExecutableManagementResponse {
+pub enum ExecutableManagementResponse {
     Healthy {
         executable: String,
         instance_id: String,

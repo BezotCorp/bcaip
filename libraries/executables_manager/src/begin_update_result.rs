@@ -1,4 +1,4 @@
-pub(crate) enum BeginUpdateResult {
+pub enum BeginUpdateResult {
     Started,
     AlreadyPending,
     AlreadyCommitted,

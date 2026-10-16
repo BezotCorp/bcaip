@@ -1,3 +1,4 @@
+use launch_ecosystem::ExecutionEnvironment;
 use std::{
     collections::HashSet,
     fs,
@@ -11,7 +12,6 @@ use crate::{
     executable_index_by_name::ExecutableIndexByName,
     executable_index_by_uuid::ExecutableIndexByUuid, executable_name::ExecutableName,
     executable_role::ExecutableRole, executable_start_phase::ExecutableStartPhase,
-    execution_environment::ExecutionEnvironment,
 };
 
 const INDEX_BY_NAME: &str = "index_by_name";
@@ -19,12 +19,14 @@ const INDEX_BY_UUID: &str = "index_by_uuid";
 
 pub struct ExecutablesManager {
     directory: PathBuf,
+    environment: ExecutionEnvironment,
 }
 
 impl ExecutablesManager {
     pub fn new(data_directory: impl AsRef<Path>, environment: ExecutionEnvironment) -> Self {
         Self {
-            directory: environment.resolve(&data_directory.as_ref().join("executables")),
+            directory: data_directory.as_ref().join("executables"),
+            environment,
         }
     }
 
@@ -228,15 +230,41 @@ impl ExecutablesManager {
                 continue;
             }
 
-            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
                 return Err(format!("invalid executable filename: {}", path.display()));
             };
 
-            if stem == INDEX_BY_NAME || stem == INDEX_BY_UUID {
-                continue;
-            }
+            let id_text = match self.environment {
+                ExecutionEnvironment::Development => {
+                    let Some(stem) = file_name.strip_suffix(".local.ron") else {
+                        continue;
+                    };
 
-            let id = ExecutableId::parse(stem)?;
+                    if stem == INDEX_BY_NAME || stem == INDEX_BY_UUID {
+                        continue;
+                    }
+
+                    stem
+                }
+
+                ExecutionEnvironment::Production => {
+                    if file_name.ends_with(".local.ron") {
+                        continue;
+                    }
+
+                    let Some(stem) = file_name.strip_suffix(".ron") else {
+                        continue;
+                    };
+
+                    if stem == INDEX_BY_NAME || stem == INDEX_BY_UUID {
+                        continue;
+                    }
+
+                    stem
+                }
+            };
+
+            let id = ExecutableId::parse(id_text)?;
 
             let source = fs::read_to_string(&path)
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -328,6 +356,7 @@ impl ExecutablesManager {
             .iter()
             .map(|executable| executable.id().to_string())
             .collect();
+
         let mut stale = Vec::new();
 
         let entries = fs::read_dir(&self.directory).map_err(|error| {
@@ -351,15 +380,45 @@ impl ExecutablesManager {
                 continue;
             }
 
-            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
 
-            if stem == INDEX_BY_NAME || stem == INDEX_BY_UUID || valid.contains(stem) {
+            let id_text = match self.environment {
+                ExecutionEnvironment::Development => {
+                    let Some(stem) = file_name.strip_suffix(".local.bin") else {
+                        continue;
+                    };
+
+                    if stem == INDEX_BY_NAME || stem == INDEX_BY_UUID {
+                        continue;
+                    }
+
+                    stem
+                }
+
+                ExecutionEnvironment::Production => {
+                    if file_name.ends_with(".local.bin") {
+                        continue;
+                    }
+
+                    let Some(stem) = file_name.strip_suffix(".bin") else {
+                        continue;
+                    };
+
+                    if stem == INDEX_BY_NAME || stem == INDEX_BY_UUID {
+                        continue;
+                    }
+
+                    stem
+                }
+            };
+
+            if valid.contains(id_text) {
                 continue;
             }
 
-            if ExecutableId::parse(stem).is_ok() {
+            if ExecutableId::parse(id_text).is_ok() {
                 stale.push(path);
             }
         }
@@ -368,27 +427,33 @@ impl ExecutablesManager {
     }
 
     fn executable_ron_path(&self, id: ExecutableId) -> PathBuf {
-        self.directory.join(format!("{id}.ron"))
+        self.environment
+            .resolve(&self.directory.join(format!("{id}.ron")))
     }
 
     fn executable_bin_path(&self, id: ExecutableId) -> PathBuf {
-        self.directory.join(format!("{id}.bin"))
+        self.environment
+            .resolve(&self.directory.join(format!("{id}.bin")))
     }
 
     fn index_by_name_ron_path(&self) -> PathBuf {
-        self.directory.join(format!("{INDEX_BY_NAME}.ron"))
+        self.environment
+            .resolve(&self.directory.join(format!("{INDEX_BY_NAME}.ron")))
     }
 
     fn index_by_name_bin_path(&self) -> PathBuf {
-        self.directory.join(format!("{INDEX_BY_NAME}.bin"))
+        self.environment
+            .resolve(&self.directory.join(format!("{INDEX_BY_NAME}.bin")))
     }
 
     fn index_by_uuid_ron_path(&self) -> PathBuf {
-        self.directory.join(format!("{INDEX_BY_UUID}.ron"))
+        self.environment
+            .resolve(&self.directory.join(format!("{INDEX_BY_UUID}.ron")))
     }
 
     fn index_by_uuid_bin_path(&self) -> PathBuf {
-        self.directory.join(format!("{INDEX_BY_UUID}.bin"))
+        self.environment
+            .resolve(&self.directory.join(format!("{INDEX_BY_UUID}.bin")))
     }
 
     fn write_ron<T>(&self, path: PathBuf, value: &T) -> Result<(), String>

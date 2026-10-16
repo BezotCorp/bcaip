@@ -1,14 +1,14 @@
 use std::{
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-use tungstenite::{Message, client};
+use servers_manager::Server;
+use ws_manager::{WsClient, WsMessage};
 
 use crate::{
-    server_deployment_descriptor::ServerDeploymentDescriptor,
     supervisor_health_request::SupervisorHealthRequest,
     supervisor_health_response::SupervisorHealthResponse,
 };
@@ -20,12 +20,20 @@ pub(crate) struct SupervisorHealth;
 
 impl SupervisorHealth {
     pub(crate) fn check(
-        descriptor: &ServerDeploymentDescriptor,
+        server: &Server,
         supervisor_address: SocketAddr,
         expected_executable: &str,
     ) -> Result<bool, String> {
+        let ssh_target = server.ssh_target().ok_or_else(|| {
+            format!(
+                "server {} has no ssh_target; remote supervisor Health cannot be checked",
+                server.name()
+            )
+        })?;
+
         let local_port = Self::available_local_port()?;
-        let mut tunnel = Self::open_tunnel(descriptor, supervisor_address, local_port)?;
+
+        let mut tunnel = Self::open_tunnel(ssh_target, supervisor_address, local_port)?;
 
         let result = Self::check_local_port(local_port, expected_executable);
 
@@ -46,7 +54,7 @@ impl SupervisorHealth {
     }
 
     fn open_tunnel(
-        descriptor: &ServerDeploymentDescriptor,
+        ssh_target: &str,
         supervisor_address: SocketAddr,
         local_port: u16,
     ) -> Result<Child, String> {
@@ -64,7 +72,7 @@ impl SupervisorHealth {
             .arg("-N")
             .arg("-L")
             .arg(forwarding)
-            .arg(descriptor.ssh_target())
+            .arg(ssh_target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -77,52 +85,44 @@ impl SupervisorHealth {
             .parse()
             .map_err(|error| format!("invalid local supervisor address: {error}"))?;
 
+        let client = WsClient::new(address);
         let deadline = Instant::now() + TUNNEL_TIMEOUT;
 
-        let stream = loop {
-            match TcpStream::connect_timeout(&address, TIMEOUT) {
-                Ok(stream) => break stream,
+        let mut connection = loop {
+            match client.connect(TIMEOUT, Some(TIMEOUT), Some(TIMEOUT)) {
+                Ok(connection) => break connection,
+
                 Err(_) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(100));
                 }
+
                 Err(_) => return Ok(false),
             }
         };
 
-        stream
-            .set_read_timeout(Some(TIMEOUT))
-            .map_err(|error| format!("failed to set read timeout: {error}"))?;
-
-        stream
-            .set_write_timeout(Some(TIMEOUT))
-            .map_err(|error| format!("failed to set write timeout: {error}"))?;
-
-        let (mut socket, _) = client(format!("ws://127.0.0.1:{local_port}/"), stream)
-            .map_err(|error| format!("WebSocket connection failed: {error}"))?;
-
         let request = ron::ser::to_string(&SupervisorHealthRequest::Health)
             .map_err(|error| format!("failed to encode Health request: {error}"))?;
 
-        socket
-            .send(Message::Text(request.into()))
+        connection
+            .send_text(&request)
             .map_err(|error| format!("failed to send Health request: {error}"))?;
 
         loop {
-            match socket.read() {
-                Ok(Message::Text(text)) => {
-                    let response: SupervisorHealthResponse = ron::from_str(text.as_str())
+            match connection.read() {
+                Ok(WsMessage::Text(text)) => {
+                    let response: SupervisorHealthResponse = ron::from_str(&text)
                         .map_err(|error| format!("invalid supervisor Health response: {error}"))?;
 
                     return Ok(response.is_healthy(expected_executable));
                 }
 
-                Ok(Message::Ping(payload)) => {
-                    socket
-                        .send(Message::Pong(payload))
+                Ok(WsMessage::Ping(payload)) => {
+                    connection
+                        .send_pong(&payload)
                         .map_err(|error| format!("failed to send Pong: {error}"))?;
                 }
 
-                Ok(Message::Pong(_)) => {}
+                Ok(WsMessage::Pong(_)) => {}
 
                 Ok(_) | Err(_) => return Ok(false),
             }

@@ -1,6 +1,7 @@
-use crate::executable::Executable;
 use crate::managed_process::ManagedProcess;
+use executables_manager::Executable;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -14,14 +15,18 @@ pub(crate) struct CandidateProcess {
 impl CandidateProcess {
     pub(crate) fn spawn(
         executable: &Executable,
+        executable_root: &Path,
         instance_id: &str,
         candidate_address: SocketAddr,
         supervisor_address: SocketAddr,
     ) -> Result<Self, String> {
-        let mut command = Command::new(executable.path());
+        let executable_path = executable.path(executable_root);
+        let working_directory = executable.working_directory_path(executable_root);
+
+        let mut command = Command::new(executable_path);
 
         command
-            .current_dir(executable.working_directory())
+            .current_dir(working_directory)
             .env("BCAIP_EXECUTABLE_ID", executable.id().to_string())
             .env("BCAIP_SUPERVISOR_CANDIDATE", "1")
             .env(

@@ -1,3 +1,4 @@
+use executables_manager::Executable;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +9,7 @@ use uuid::Uuid;
 
 use crate::managed_process::ManagedProcess;
 use crate::{
-    auto_updater::AutoUpdater, executable::Executable, executable_launcher::ExecutableLauncher,
+    auto_updater::AutoUpdater, executable_launcher::ExecutableLauncher,
     executable_store::ExecutableStore, monitoring_state::MonitoringState,
     supervisor_config::SupervisorConfig, ws_health::WsHealth,
 };
@@ -31,13 +32,15 @@ impl SupervisorMonitor {
         stop: Arc<AtomicBool>,
         supervisor_address: SocketAddr,
     ) -> Self {
+        let launcher = ExecutableLauncher::new(config.executable_root());
+
         Self {
             store,
             config,
             stop,
             supervisor_address,
             state: MonitoringState::new(FAILURE_LIMIT),
-            launcher: ExecutableLauncher::new(),
+            launcher,
         }
     }
 
@@ -160,16 +163,20 @@ impl SupervisorMonitor {
         let update_restart = executable.needs_update_restart();
 
         if healthy && !update_restart {
-            self.state.reset_executable(executable.name());
+            self.state.reset_executable(executable.name().as_str());
             return;
         }
 
-        if !update_restart && !self.state.executable_failed_enough(executable.name()) {
+        if !update_restart
+            && !self
+                .state
+                .executable_failed_enough(executable.name().as_str())
+        {
             return;
         }
 
         self.restart_executable(executable, update_restart);
-        self.state.reset_executable(executable.name());
+        self.state.reset_executable(executable.name().as_str());
     }
 
     fn update_self_with_candidate(&self, executable: &Executable) -> bool {
@@ -179,7 +186,7 @@ impl SupervisorMonitor {
 
         println!(
             "[Supervisor] validating {} candidate after committed update",
-            executable.name()
+            executable.name().as_str()
         );
 
         AutoUpdater::new(
@@ -194,7 +201,7 @@ impl SupervisorMonitor {
     fn restart_executable(&self, executable: &Executable, update_restart: bool) {
         println!(
             "[Supervisor] restarting {}{}",
-            executable.name(),
+            executable.name().as_str(),
             if update_restart {
                 " after committed update"
             } else {
@@ -206,11 +213,11 @@ impl SupervisorMonitor {
 
         if let Err(error) = self
             .store
-            .expect_process(executable.name(), &process_instance_id)
+            .expect_process(executable.name().as_str(), &process_instance_id)
         {
             println!(
                 "[Supervisor] failed to reserve {} process instance: {}",
-                executable.name(),
+                executable.name().as_str(),
                 error
             );
             return;
@@ -222,7 +229,7 @@ impl SupervisorMonitor {
         {
             println!(
                 "[Supervisor] failed to restart {}: {}",
-                executable.name(),
+                executable.name().as_str(),
                 error
             );
         }
@@ -249,19 +256,22 @@ impl SupervisorMonitor {
                 if let Err(error) = self.launcher.stop(&executable) {
                     println!(
                         "[Supervisor] failed to stop previous {} process, keeping its record: {}",
-                        executable.name(),
+                        executable.name().as_str(),
                         error
                     );
 
                     continue;
                 }
-            } else if ManagedProcess::is_running_binary(process.pid(), &executable.path()) {
+            } else if ManagedProcess::is_running_binary(
+                process.pid(),
+                &executable.path(self.config.executable_root()),
+            ) {
                 // Not started by the supervisor, so not stopped by it either.
                 continue;
             }
 
             self.store
-                .clear_process(executable.name(), process.instance_id())?;
+                .clear_process(executable.name().as_str(), process.instance_id())?;
         }
 
         Ok(())

@@ -49,13 +49,14 @@ impl ExecutionEnvironment {
             return path.to_path_buf();
         };
 
-        let local = match file_name.rsplit_once('.') {
-            Some((stem, extension)) if !stem.is_empty() => {
-                format!("{stem}.local.{extension}")
-            }
-            _ => format!("{file_name}.local"),
+        let Some((stem, extension)) = file_name.rsplit_once('.') else {
+            return path.to_path_buf();
         };
 
-        path.with_file_name(local)
+        if stem.is_empty() || extension.is_empty() {
+            return path.to_path_buf();
+        }
+
+        path.with_file_name(format!("{stem}.local.{extension}"))
     }
 }

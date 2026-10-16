@@ -1,8 +1,9 @@
-use crate::executable::Executable;
 use crate::managed_process::ManagedProcess;
+use executables_manager::Executable;
 use executables_manager::ExecutableId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -14,12 +15,14 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// Processes started by a previous supervisor (before a promotion) have no
 /// `Child` here; they are stopped through their recorded pid.
 pub(crate) struct ExecutableLauncher {
+    executable_root: PathBuf,
     children: Mutex<HashMap<ExecutableId, ManagedProcess>>,
 }
 
 impl ExecutableLauncher {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(executable_root: &Path) -> Self {
         Self {
+            executable_root: executable_root.to_path_buf(),
             children: Mutex::new(HashMap::new()),
         }
     }
@@ -33,16 +36,19 @@ impl ExecutableLauncher {
     ) -> Result<(), String> {
         self.stop(executable)?;
 
-        let mut command = Command::new(executable.path());
+        let executable_path = executable.path(&self.executable_root);
+        let working_directory = executable.working_directory_path(&self.executable_root);
+
+        let mut command = Command::new(executable_path);
 
         command
-            .current_dir(executable.working_directory())
+            .current_dir(working_directory)
             .env_remove("NOTIFY_SOCKET")
             .env_remove("BCAIP_SUPERVISOR_CANDIDATE")
             .env_remove("BCAIP_SUPERVISOR_BIND_ADDRESS")
             .env_remove("BCAIP_SUPERVISOR_CANDIDATE_BIND_ADDRESS")
             .env("BCAIP_EXECUTABLE_ID", executable.id().to_string())
-            .env("BCAIP_EXECUTABLE_NAME", executable.name())
+            .env("BCAIP_EXECUTABLE_NAME", executable.name().as_str())
             .env("BCAIP_INSTANCE_ID", instance_id)
             .env(
                 "BCAIP_WS_ADDRESS",
@@ -84,9 +90,11 @@ impl ExecutableLauncher {
         match (owned, executable.process()) {
             (Some(process), _) => process.terminate(STOP_GRACE),
 
-            (None, Some(inherited)) => {
-                ManagedProcess::terminate_inherited(inherited.pid(), &executable.path(), STOP_GRACE)
-            }
+            (None, Some(inherited)) => ManagedProcess::terminate_inherited(
+                inherited.pid(),
+                &executable.path(&self.executable_root),
+                STOP_GRACE,
+            ),
 
             (None, None) => Ok(()),
         }

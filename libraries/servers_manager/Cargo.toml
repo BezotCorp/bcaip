@@ -1,0 +1,11 @@
+[package]
+name = "servers_manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ron.workspace = true
+launch_ecosystem = { version = "0.1.0", path = "../launch_ecosystem" }
+bincode-next.workspace = true
+serde.workspace = true
+uuid.workspace = true

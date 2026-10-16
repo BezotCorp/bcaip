@@ -1,7 +1,7 @@
 use crate::executable_store::ExecutableStore;
 use crate::handover_journal::HandoverJournal;
 use crate::handover_phase::HandoverPhase;
-use crate::runtime_state_backup::RuntimeStateBackup;
+use executables_manager::RuntimeStateBackup;
 use std::path::Path;
 use std::sync::MutexGuard;
 use std::time::Duration;

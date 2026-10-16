@@ -93,6 +93,10 @@ impl SystemdIntegration {
         environment: &LocalEnvironment,
         executable: &Executable,
     ) -> Result<(), String> {
+        let working_directory =
+            executable.working_directory_path(environment.executable_root_directory());
+        let executable_path = executable.path(environment.executable_root_directory());
+
         let unit = format!(
             r#"[Unit]
 Description=BCAIP {}
@@ -108,6 +112,7 @@ RestartSec=1
 KillMode=control-group
 TimeoutStopSec=15
 Environment=BCAIP_EXECUTABLE_ID={}
+Environment=BCAIP_EXECUTABLE_ROOT={}
 Environment=BCAIP_DATA_DIR={}
 
 [Install]
@@ -118,9 +123,10 @@ WantedBy=multi-user.target
 ExecutableId={}
 "#,
             executable.name(),
-            executable.working_directory(),
-            executable.path().display(),
+            working_directory.display(),
+            executable_path.display(),
             executable.id(),
+            environment.executable_root_directory().display(),
             environment.data_directory().display(),
             OWNER_MARKER,
             executable.id(),

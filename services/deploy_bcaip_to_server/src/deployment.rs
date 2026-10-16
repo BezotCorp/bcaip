@@ -1,12 +1,10 @@
-use executables_manager::{
-    ExecutableRole, ExecutableStartPhase, ExecutablesManager, ExecutionEnvironment,
-};
+use executables_manager::{ExecutableRole, ExecutableStartPhase, ExecutablesManager};
+use launch_ecosystem::ExecutionEnvironment;
+use servers_manager::{Server, ServerDeploymentStatus, ServersManager};
 
 use crate::{
     deployment_paths::DeploymentPaths, initial_deployment::InitialDeployment,
-    server_deployment_descriptor::ServerDeploymentDescriptor,
-    server_deployment_index::ServerDeploymentIndex,
-    server_deployment_status::ServerDeploymentStatus, supervisor_health::SupervisorHealth,
+    supervisor_health::SupervisorHealth,
 };
 
 pub(crate) struct Deployment {
@@ -23,27 +21,27 @@ impl Deployment {
     }
 
     pub(crate) fn run(&self) -> Result<(), String> {
-        let mut index =
-            ServerDeploymentIndex::load(self.paths.index_ron(), self.paths.index_bin())?;
+        let servers_manager = ServersManager::new(self.paths.data_directory(), self.environment);
 
-        let has_deployment = (0..index.len()).any(|position| {
-            index
-                .entry(position)
-                .is_some_and(|entry| entry.should_deploy())
-        });
+        servers_manager.ensure_materialized()?;
 
-        if !has_deployment {
+        let server_index = servers_manager.index_by_name()?;
+
+        if !server_index
+            .entries()
+            .any(|(_, entry)| entry.is_deployment_target())
+        {
             println!("[DeployBcaipToServer] no server requires deployment");
             return Ok(());
         }
 
-        // This side owns the RON sources: the shipped `.bin` are materialized from them.
-        let manager = ExecutablesManager::new(self.paths.data_directory(), self.environment);
+        let executables_manager =
+            ExecutablesManager::new(self.paths.data_directory(), self.environment);
 
-        manager.ensure_materialized()?;
+        executables_manager.ensure_materialized()?;
 
-        let executables = manager.list()?;
-        let executable_files = manager.binary_files()?;
+        let executables = executables_manager.list()?;
+        let executable_files = executables_manager.binary_files()?;
 
         if !executables.iter().any(|executable| {
             executable.start_phase() == ExecutableStartPhase::BcaipEnvironmentSetup
@@ -51,79 +49,70 @@ impl Deployment {
             return Err("no executable belongs to BcaipEnvironmentSetup".to_string());
         }
 
-        let authority = manager.resolve_unique_by_role(ExecutableRole::BcaipAuthorityServer)?;
+        let authority =
+            executables_manager.resolve_unique_by_role(ExecutableRole::BcaipAuthorityServer)?;
 
         let supervisor_ws_address = authority.default_ws_address();
         let supervisor_name = authority.name().as_str();
 
-        for position in 0..index.len() {
-            let Some(entry) = index.entry(position) else {
-                continue;
-            };
-
-            if !entry.should_deploy() {
+        for (_, entry) in server_index.entries() {
+            if !entry.is_deployment_target() {
                 continue;
             }
 
-            let server_key = entry.server_key().to_string();
-            let status = entry.status();
+            let server = servers_manager.resolve_by_id(entry.id())?;
 
-            let descriptor = ServerDeploymentDescriptor::materialize_and_load(
-                self.paths.server_ron(&server_key),
-                self.paths.server_bin(&server_key),
-            )?;
-
-            match status {
+            match entry.deployment_status() {
                 ServerDeploymentStatus::NeverBooted => {
                     InitialDeployment::execute(
-                        &descriptor,
+                        &server,
                         self.paths.workspace_root(),
                         &executables,
                         &executable_files,
                         self.environment,
                         || {
-                            let entry = index.entry_mut(position).ok_or_else(|| {
-                                format!("server index entry disappeared: {server_key}")
-                            })?;
-
-                            entry.mark_pending();
-                            index.save()
+                            servers_manager
+                                .set_deployment_status(server.id(), ServerDeploymentStatus::Pending)
                         },
                     )?;
 
-                    if SupervisorHealth::check(&descriptor, supervisor_ws_address, supervisor_name)?
-                    {
-                        let entry = index.entry_mut(position).ok_or_else(|| {
-                            format!("server index entry disappeared: {server_key}")
-                        })?;
-
-                        entry.mark_booted();
-                        index.save()?;
-
-                        println!("[DeployBcaipToServer] {server_key} is booted");
-                    } else {
-                        println!("[DeployBcaipToServer] {server_key} is pending");
-                    }
+                    self.confirm_boot(
+                        &servers_manager,
+                        &server,
+                        supervisor_ws_address,
+                        supervisor_name,
+                    )?;
                 }
 
                 ServerDeploymentStatus::Pending => {
-                    if SupervisorHealth::check(&descriptor, supervisor_ws_address, supervisor_name)?
-                    {
-                        let entry = index.entry_mut(position).ok_or_else(|| {
-                            format!("server index entry disappeared: {server_key}")
-                        })?;
-
-                        entry.mark_booted();
-                        index.save()?;
-
-                        println!("[DeployBcaipToServer] {server_key} is booted");
-                    } else {
-                        println!("[DeployBcaipToServer] {server_key} is still pending");
-                    }
+                    self.confirm_boot(
+                        &servers_manager,
+                        &server,
+                        supervisor_ws_address,
+                        supervisor_name,
+                    )?;
                 }
 
                 ServerDeploymentStatus::Booted => {}
             }
+        }
+
+        Ok(())
+    }
+
+    fn confirm_boot(
+        &self,
+        servers_manager: &ServersManager,
+        server: &Server,
+        supervisor_ws_address: std::net::SocketAddr,
+        supervisor_name: &str,
+    ) -> Result<(), String> {
+        if SupervisorHealth::check(server, supervisor_ws_address, supervisor_name)? {
+            servers_manager.set_deployment_status(server.id(), ServerDeploymentStatus::Booted)?;
+
+            println!("[DeployBcaipToServer] {} is booted", server.name());
+        } else {
+            println!("[DeployBcaipToServer] {} is pending", server.name());
         }
 
         Ok(())

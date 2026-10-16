@@ -4,7 +4,7 @@ use crate::executable_backup::ExecutableBackup;
 use crate::executable_store::ExecutableStore;
 use crate::handover_journal::HandoverJournal;
 use crate::handover_phase::HandoverPhase;
-use crate::runtime_state_backup::RuntimeStateBackup;
+use executables_manager::RuntimeStateBackup;
 use std::path::{Path, PathBuf};
 
 /// Startup recovery of an interrupted auto-update. The writer lock is held
@@ -13,13 +13,18 @@ use std::path::{Path, PathBuf};
 /// simply resumes the same recovery at the next start.
 pub(crate) struct HandoverRecovery {
     data_directory: PathBuf,
+    executable_root: PathBuf,
     journal: HandoverJournal,
 }
 
 impl HandoverRecovery {
-    pub(crate) fn detect(data_directory: &Path) -> Result<Option<Self>, String> {
+    pub(crate) fn detect(
+        data_directory: &Path,
+        executable_root: &Path,
+    ) -> Result<Option<Self>, String> {
         Ok(HandoverJournal::load(data_directory)?.map(|journal| Self {
             data_directory: data_directory.to_path_buf(),
+            executable_root: executable_root.to_path_buf(),
             journal,
         }))
     }
@@ -27,9 +32,10 @@ impl HandoverRecovery {
     /// Final step of a successful promotion, done by the promoted supervisor.
     pub(crate) fn confirm_promotion(
         data_directory: &Path,
+        executable_root: &Path,
         store: &ExecutableStore,
     ) -> Result<(), String> {
-        match Self::detect(data_directory)? {
+        match Self::detect(data_directory, executable_root)? {
             Some(recovery) if recovery.journal.phase() == HandoverPhase::Committed => {
                 recovery.conclude(store).map(|_| ())
             }
@@ -74,7 +80,8 @@ impl HandoverRecovery {
         let mut binary_restored = false;
 
         match store.get(executable)? {
-            Some(definition) => match ExecutableBackup::of(&definition.path()) {
+            Some(definition) => match ExecutableBackup::of(&definition.path(&self.executable_root))
+            {
                 Ok(backup) if backup.is_available() => match backup.restore() {
                     Ok(()) => binary_restored = true,
                     Err(error) => errors.push(error),

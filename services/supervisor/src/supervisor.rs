@@ -1,11 +1,11 @@
-use crate::authority_state::AuthorityState;
-use crate::executable::Executable;
 use crate::executable_store::ExecutableStore;
 use crate::handover_recovery::HandoverRecovery;
 use crate::supervisor_config::SupervisorConfig;
 use crate::supervisor_monitor::SupervisorMonitor;
 use crate::systemd_notifier::SystemdNotifier;
 use crate::update_server::UpdateServer;
+use executables_manager::AuthorityState;
+use executables_manager::Executable;
 use executables_manager::Process;
 use std::error::Error;
 use std::io;
@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
+use ws_manager::WsServer;
 
 pub(crate) struct Supervisor {
     config: SupervisorConfig,
@@ -37,7 +38,7 @@ impl Supervisor {
             AuthorityState::writer(config.data_directory())?
         };
         let mut recovery = match authority.can_write() {
-            true => HandoverRecovery::detect(config.data_directory())?,
+            true => HandoverRecovery::detect(config.data_directory(), config.executable_root())?,
             false => None,
         };
 
@@ -54,7 +55,7 @@ impl Supervisor {
         }
 
         if store.can_write() {
-            UpdateServer::reconcile_all(&store)?;
+            UpdateServer::reconcile_all(&store, config.executable_root())?;
         }
 
         let self_definition = store.get(config.supervisor_name())?;
@@ -166,17 +167,23 @@ impl Supervisor {
                     let connection_applied_update_id = self.applied_update_id.clone();
 
                     thread::spawn(move || {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-
-                        let update_server = UpdateServer::new(
-                            &connection_store,
-                            &connection_config,
-                            &connection_instance_id,
-                            connection_applied_update_id.as_deref(),
+                        let ws_server = WsServer::new(
+                            Some(Duration::from_secs(30)),
+                            Some(Duration::from_secs(30)),
                         );
 
-                        if let Err(error) = update_server.handle_connection(stream) {
+                        let result = ws_server.accept(stream).and_then(|connection| {
+                            let update_server = UpdateServer::new(
+                                &connection_store,
+                                &connection_config,
+                                &connection_instance_id,
+                                connection_applied_update_id.as_deref(),
+                            );
+
+                            update_server.handle_connection(connection)
+                        });
+
+                        if let Err(error) = result {
                             println!("[Supervisor] connection from {} failed: {}", peer, error);
                         }
                     });
@@ -212,9 +219,13 @@ impl Supervisor {
                 listener.set_nonblocking(true)?;
                 self.actual_address = listener.local_addr()?;
                 self.listener = listener;
-                UpdateServer::reconcile_all(&self.store)?;
+                UpdateServer::reconcile_all(&self.store, self.config.executable_root())?;
                 self.monitor = Some(self.spawn_monitor());
-                HandoverRecovery::confirm_promotion(self.config.data_directory(), &self.store)?;
+                HandoverRecovery::confirm_promotion(
+                    self.config.data_directory(),
+                    self.config.executable_root(),
+                    &self.store,
+                )?;
 
                 println!(
                     "[Supervisor] promoted candidate is now authoritative on {}",

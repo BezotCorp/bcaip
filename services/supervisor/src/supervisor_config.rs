@@ -1,9 +1,9 @@
-use crate::executable::Executable;
+use executables_manager::Executable;
 use executables_manager::{ExecutableId, ExecutablesManager, ExecutionEnvironment};
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3010";
 const DEFAULT_CANDIDATE_BIND_ADDRESS: &str = "127.0.0.1:3011";
@@ -11,6 +11,7 @@ const DEFAULT_CANDIDATE_BIND_ADDRESS: &str = "127.0.0.1:3011";
 #[derive(Clone, Debug)]
 pub(crate) struct SupervisorConfig {
     data_directory: PathBuf,
+    executable_root: PathBuf,
     supervisor_id: ExecutableId,
     supervisor_name: String,
     bind_address_override: Option<SocketAddr>,
@@ -22,6 +23,8 @@ pub(crate) struct SupervisorConfig {
 impl SupervisorConfig {
     pub(crate) fn from_env() -> Result<Self, Box<dyn Error>> {
         let data_directory = Self::load_data_directory()?;
+        let executable_root = Self::load_executable_root()?;
+
         let supervisor_id = ExecutableId::parse(
             &env::var("BCAIP_EXECUTABLE_ID")
                 .map_err(|_| "BCAIP_EXECUTABLE_ID must identify this supervisor")?,
@@ -34,6 +37,7 @@ impl SupervisorConfig {
 
         Ok(Self {
             data_directory,
+            executable_root,
             supervisor_id,
             supervisor_name: supervisor.name().as_str().to_string(),
             bind_address_override: Self::bind_address_override()?,
@@ -45,6 +49,10 @@ impl SupervisorConfig {
 
     pub(crate) fn data_directory(&self) -> &PathBuf {
         &self.data_directory
+    }
+
+    pub(crate) fn executable_root(&self) -> &Path {
+        &self.executable_root
     }
 
     pub(crate) fn supervisor_name(&self) -> &str {
@@ -113,6 +121,21 @@ impl SupervisorConfig {
         }
 
         Ok(DEFAULT_CANDIDATE_BIND_ADDRESS.parse()?)
+    }
+
+    fn load_executable_root() -> Result<PathBuf, Box<dyn Error>> {
+        let value =
+            env::var_os("BCAIP_EXECUTABLE_ROOT").ok_or("BCAIP_EXECUTABLE_ROOT is required")?;
+
+        let path = PathBuf::from(value);
+
+        if !path.is_absolute() {
+            return Err(
+                format!("BCAIP_EXECUTABLE_ROOT must be absolute: {}", path.display()).into(),
+            );
+        }
+
+        Ok(path)
     }
 
     fn load_data_directory() -> Result<PathBuf, Box<dyn Error>> {

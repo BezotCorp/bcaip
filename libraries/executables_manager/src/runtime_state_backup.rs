@@ -1,18 +1,18 @@
+use crate::ExecutableRuntime;
 use crate::atomic_file::AtomicFile;
-use crate::executable_runtime::ExecutableRuntime;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Snapshot of the runtime state file taken before a candidate may run.
-/// It is also copied next to the original so it survives a supervisor crash.
-pub(crate) struct RuntimeStateBackup {
+/// Snapshot of the runtime state file taken before an update may alter it.
+/// It is also copied next to the original so it survives a process crash.
+pub struct RuntimeStateBackup {
     path: PathBuf,
     copy_path: PathBuf,
     bytes: Option<Vec<u8>>,
 }
 
 impl RuntimeStateBackup {
-    pub(crate) fn capture(path: &Path) -> Result<Self, String> {
+    pub fn capture(path: &Path) -> Result<Self, String> {
         let copy_path = Self::copy_path_of(path);
 
         let bytes = if path.exists() {
@@ -48,28 +48,22 @@ impl RuntimeStateBackup {
 
     /// Restores the runtime state from its durable copy; no copy means the
     /// state did not exist when the backup was taken.
-    pub(crate) fn restore_saved(path: &Path) -> Result<(), String> {
+    pub fn restore_saved(path: &Path) -> Result<(), String> {
         let copy_path = Self::copy_path_of(path);
 
         if copy_path.exists() {
             let bytes = fs::read(&copy_path)
                 .map_err(|error| format!("failed to read {}: {error}", copy_path.display()))?;
 
-            // The copy is only read, never rewritten. A copy taken before
-            // the layout change is restored in the current layout.
-            let (runtimes, migrated) =
-                ExecutableRuntime::decode_state(&bytes).map_err(|error| {
-                    format!(
-                        "backup {} cannot be restored: {error}; it is left untouched",
-                        copy_path.display()
-                    )
-                })?;
+            // Validate the persisted runtime state before restoring it.
+            ExecutableRuntime::decode_state(&bytes).map_err(|error| {
+                format!(
+                    "backup {} cannot be restored: {error}; it is left untouched",
+                    copy_path.display()
+                )
+            })?;
 
-            return if migrated {
-                AtomicFile::write(path, &ExecutableRuntime::encode_state(&runtimes)?)
-            } else {
-                AtomicFile::write(path, &bytes)
-            };
+            return AtomicFile::write(path, &bytes);
         }
 
         if path.exists() {
@@ -80,11 +74,11 @@ impl RuntimeStateBackup {
         Ok(())
     }
 
-    pub(crate) fn copy_path(&self) -> &Path {
+    pub fn copy_path(&self) -> &Path {
         &self.copy_path
     }
 
-    pub(crate) fn matches_current(&self) -> Result<bool, String> {
+    pub fn matches_current(&self) -> Result<bool, String> {
         match &self.bytes {
             Some(expected) => {
                 let current = fs::read(&self.path)
@@ -97,7 +91,7 @@ impl RuntimeStateBackup {
         }
     }
 
-    pub(crate) fn restore(&self) -> Result<(), String> {
+    pub fn restore(&self) -> Result<(), String> {
         match &self.bytes {
             Some(bytes) => AtomicFile::write(&self.path, bytes),
 

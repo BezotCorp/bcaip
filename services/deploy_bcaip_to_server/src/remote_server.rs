@@ -3,15 +3,24 @@ use std::{
     process::{Command, Output},
 };
 
+use servers_manager::Server;
+
 pub(crate) struct RemoteServer {
     ssh_target: String,
 }
 
 impl RemoteServer {
-    pub(crate) fn new(ssh_target: &str) -> Self {
-        Self {
+    pub(crate) fn for_server(server: &Server) -> Result<Self, String> {
+        let ssh_target = server.ssh_target().ok_or_else(|| {
+            format!(
+                "server {} has no ssh_target; local deployment is not implemented yet",
+                server.name()
+            )
+        })?;
+
+        Ok(Self {
             ssh_target: ssh_target.to_string(),
-        }
+        })
     }
 
     pub(crate) fn operating_system(&self) -> Result<String, String> {
@@ -22,10 +31,27 @@ impl RemoteServer {
         self.read_command("uname -m")
     }
 
-    pub(crate) fn create_temporary_directory(&self) -> Result<String, String> {
-        let directory = self.read_command("mktemp -d /tmp/bcaip.XXXXXXXX")?;
+    pub(crate) fn create_temporary_directory(
+        &self,
+        temporary_root_path: &str,
+    ) -> Result<String, String> {
+        let root = temporary_root_path.trim_end_matches('/');
 
-        if !directory.starts_with("/tmp/bcaip.") {
+        let template = if root.is_empty() {
+            "/bcaip.XXXXXXXX".to_string()
+        } else {
+            format!("{root}/bcaip.XXXXXXXX")
+        };
+
+        let expected_prefix = if root.is_empty() {
+            "/bcaip.".to_string()
+        } else {
+            format!("{root}/bcaip.")
+        };
+
+        let directory = self.read_command(&format!("mktemp -d '{template}'"))?;
+
+        if !directory.starts_with(&expected_prefix) {
             return Err(format!(
                 "remote server returned unexpected temporary directory: {directory}"
             ));

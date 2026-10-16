@@ -1,7 +1,11 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub(crate) struct LocalEnvironment {
-    bcaip_directory: PathBuf,
+    executable_root_directory: PathBuf,
     data_directory: PathBuf,
     service_directory: PathBuf,
 }
@@ -25,21 +29,33 @@ impl LocalEnvironment {
         }
 
         Ok(Self {
-            bcaip_directory: PathBuf::from("/opt/bcaip"),
-            data_directory: PathBuf::from("/var/lib/bcaip"),
+            executable_root_directory: Self::required_absolute_path("BCAIP_EXECUTABLE_ROOT")?,
+            data_directory: Self::required_absolute_path("BCAIP_DATA_DIR")?,
             service_directory: PathBuf::from("/etc/systemd/system"),
         })
     }
 
-    pub(crate) fn bcaip_directory(&self) -> &std::path::Path {
-        &self.bcaip_directory
+    pub(crate) fn executable_root_directory(&self) -> &Path {
+        &self.executable_root_directory
     }
 
-    pub(crate) fn data_directory(&self) -> &std::path::Path {
+    pub(crate) fn data_directory(&self) -> &Path {
         &self.data_directory
     }
 
-    pub(crate) fn service_directory(&self) -> &std::path::Path {
+    pub(crate) fn service_directory(&self) -> &Path {
         &self.service_directory
+    }
+
+    fn required_absolute_path(name: &str) -> Result<PathBuf, String> {
+        let value = env::var_os(name).ok_or_else(|| format!("{name} is required"))?;
+
+        let path = PathBuf::from(value);
+
+        if !path.is_absolute() {
+            return Err(format!("{name} must be absolute: {}", path.display()));
+        }
+
+        Ok(path)
     }
 }

@@ -1,13 +1,13 @@
 use crate::atomic_file::AtomicFile;
-use crate::authority_state::AuthorityState;
-use crate::begin_update_result::BeginUpdateResult;
-use crate::executable::Executable;
-use crate::executable_runtime::ExecutableRuntime;
 use crate::handover_journal::HandoverJournal;
 use crate::managed_process::ManagedProcess;
 use crate::runtime_handover::RuntimeHandover;
-use crate::runtime_state_backup::RuntimeStateBackup;
+use executables_manager::AuthorityState;
+use executables_manager::BeginUpdateResult;
+use executables_manager::Executable;
+use executables_manager::ExecutableRuntime;
 use executables_manager::Process;
+use executables_manager::RuntimeStateBackup;
 use executables_manager::Update;
 use executables_manager::{ExecutableId, ExecutablesManager, ExecutionEnvironment};
 use sha2::{Digest, Sha256};
@@ -50,13 +50,13 @@ impl ExecutableStore {
         let source_path = definitions.directory().to_path_buf();
         let runtime_path = Self::runtime_path(data_directory);
 
-        let (mut runtimes, legacy_bytes) = Self::read_runtime_state(&runtime_path)?;
+        let mut runtimes = Self::read_runtime_state(&runtime_path)?;
 
         let executables: Vec<Executable> = definitions_list
             .into_iter()
             .map(|definition| match runtimes.remove(&definition.id()) {
                 Some(runtime) => Executable::with_runtime(definition, runtime),
-                None => Executable::new(definition),
+                None => definition,
             })
             .collect();
 
@@ -84,10 +84,6 @@ impl ExecutableStore {
         };
 
         if store.authority.can_write() {
-            if let Some(bytes) = legacy_bytes {
-                store.keep_pre_migration_copy(&bytes)?;
-            }
-
             store.persist()?;
         }
 
@@ -133,13 +129,13 @@ impl ExecutableStore {
         self.authority.acquire(timeout)
     }
 
-    /// Candidate side of a promotion: takes the OS-level authority, records
-    /// this process as the authoritative instance and persists the state.
+    /// Takes the OS-level write authority, records this process as the
+    /// authoritative instance and persists the state.
     pub(crate) fn promote_candidate(&self, name: &str, process: Process) -> Result<(), String> {
         let _gate = self.gate()?;
 
         if self.authority.can_write() {
-            return Err("supervisor is already the authoritative writer".to_string());
+            return Err("this process already holds the write authority".to_string());
         }
 
         {
@@ -508,29 +504,6 @@ impl ExecutableStore {
             .ok_or_else(|| format!("unknown executable: {name}"))
     }
 
-    /// Keeps the former state file before it is replaced. An existing copy is
-    /// never overwritten: if it differs, the migration is refused.
-    fn keep_pre_migration_copy(&self, bytes: &[u8]) -> Result<(), String> {
-        let mut name = self.runtime_path.as_os_str().to_os_string();
-        name.push(".pre-migration");
-        let copy_path = PathBuf::from(name);
-
-        match fs::read(&copy_path) {
-            Ok(existing) if existing == bytes => Ok(()),
-
-            Ok(_) => Err(format!(
-                "{} already exists with different content; refusing to migrate over it",
-                copy_path.display()
-            )),
-
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                AtomicFile::write(&copy_path, bytes)
-            }
-
-            Err(error) => Err(format!("failed to read {}: {error}", copy_path.display())),
-        }
-    }
-
     fn persist_snapshot(&self, executables: &[Executable]) -> Result<(), String> {
         let runtimes: Vec<ExecutableRuntime> = executables
             .iter()
@@ -548,7 +521,7 @@ impl ExecutableStore {
         let mut default_addresses = HashSet::new();
 
         for executable in executables {
-            executable.validate_definition()?;
+            executable.validate()?;
 
             if !names.insert(executable.name()) {
                 return Err(format!("duplicate executable: {}", executable.name()));
@@ -565,17 +538,13 @@ impl ExecutableStore {
         Ok(())
     }
 
-    /// Runtime state by `ExecutableId`. A missing file is a first start. The
-    /// former layout (definitions embedded) is migrated to runtime-only
-    /// state, and its bytes are returned so they can be kept. Any other
-    /// content is an error: it is never replaced by an empty state.
     fn read_runtime_state(
         runtime_path: &Path,
-    ) -> Result<(HashMap<ExecutableId, ExecutableRuntime>, Option<Vec<u8>>), String> {
+    ) -> Result<HashMap<ExecutableId, ExecutableRuntime>, String> {
         let bytes = match fs::read(runtime_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((HashMap::new(), None));
+                return Ok(HashMap::new());
             }
             Err(error) => {
                 return Err(format!(
@@ -584,21 +553,11 @@ impl ExecutableStore {
                 ));
             }
         };
-        let (runtimes, migrated) = ExecutableRuntime::decode_state(&bytes).map_err(|error| {
-            format!(
-                "{}: {error}; left untouched, move it away to start from an empty state",
-                runtime_path.display()
-            )
-        })?;
 
-        if migrated {
-            println!(
-                "[Supervisor] migrating {} to runtime-only state",
-                runtime_path.display()
-            );
-        }
+        let runtimes = ExecutableRuntime::decode_state(&bytes)
+            .map_err(|error| format!("{}: {error}", runtime_path.display()))?;
 
-        Ok((Self::by_id(runtimes), migrated.then_some(bytes)))
+        Ok(Self::by_id(runtimes))
     }
 
     fn by_id(runtimes: Vec<ExecutableRuntime>) -> HashMap<ExecutableId, ExecutableRuntime> {

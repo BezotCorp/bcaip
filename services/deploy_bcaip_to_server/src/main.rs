@@ -3,17 +3,13 @@ mod deployment;
 mod deployment_paths;
 mod initial_deployment;
 mod remote_server;
-mod server_deployment_descriptor;
-mod server_deployment_index;
-mod server_deployment_index_entry;
-mod server_deployment_status;
 mod service_builder;
 mod supervisor_health;
 mod supervisor_health_request;
 mod supervisor_health_response;
 
 use deployment::Deployment;
-use executables_manager::ExecutionEnvironment;
+use launch_ecosystem::ExecutionEnvironment;
 
 fn main() -> Result<(), String> {
     let mut arguments = std::env::args().skip(1);
