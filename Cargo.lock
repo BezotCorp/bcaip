@@ -315,6 +315,7 @@ version = "0.1.0"
 dependencies = [
  "executables_manager",
  "files_manager",
+ "launch_ecosystem",
 ]
 
 [[package]]
@@ -556,6 +557,7 @@ dependencies = [
  "ctrlc",
  "executables_manager",
  "files_manager",
+ "launch_ecosystem",
  "ron",
  "rustix",
  "serde",

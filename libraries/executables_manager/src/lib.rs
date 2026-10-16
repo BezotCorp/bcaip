@@ -32,7 +32,6 @@ pub use executable_role::ExecutableRole;
 pub use executable_runtime::ExecutableRuntime;
 pub use executable_start_phase::ExecutableStartPhase;
 pub use executables_manager::ExecutablesManager;
-pub use launch_ecosystem::ExecutionEnvironment;
 pub use process::Process;
 pub use runtime_state_backup::RuntimeStateBackup;
 pub use update::Update;

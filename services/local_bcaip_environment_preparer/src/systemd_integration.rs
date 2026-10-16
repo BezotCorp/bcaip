@@ -1,11 +1,10 @@
 use std::{collections::HashSet, fs, process::Command};
 
-use executables_manager::{
-    Executable, ExecutableStartPhase, ExecutablesManager, ExecutionEnvironment,
-};
+use executables_manager::{Executable, ExecutableStartPhase, ExecutablesManager};
+use files_manager::AtomicFile;
+use launch_ecosystem::ExecutionEnvironment;
 
 use crate::local_environment::LocalEnvironment;
-use files_manager::AtomicFile;
 
 const UNIT_PREFIX: &str = "bcaip-";
 const UNIT_SUFFIX: &str = ".service";

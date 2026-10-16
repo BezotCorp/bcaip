@@ -12,5 +12,6 @@ sha2.workspace = true
 ctrlc = { version = "3.4", features = ["termination"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "time"] }
 files_manager = { version = "0.1.0", path = "../../libraries/files_manager" }
+launch_ecosystem = { version = "0.1.0", path = "../../libraries/launch_ecosystem" }
 executables_manager = { version = "0.1.0", path = "../../libraries/executables_manager" }
 ws_manager = { version = "0.1.0", path = "../../libraries/ws_manager" }

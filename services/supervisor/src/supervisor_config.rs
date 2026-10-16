@@ -1,5 +1,6 @@
 use executables_manager::Executable;
-use executables_manager::{ExecutableId, ExecutablesManager, ExecutionEnvironment};
+use executables_manager::{ExecutableId, ExecutablesManager};
+use launch_ecosystem::ExecutionEnvironment;
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
