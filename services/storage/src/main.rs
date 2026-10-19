@@ -2,6 +2,7 @@ mod data_record;
 mod request_handler;
 mod sqlite_engine;
 mod storage_engine;
+mod storage_mutation_error;
 mod storage_service;
 mod websocket_server;
 
@@ -37,9 +38,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let engine = SqliteEngine::open(&path)?;
 
-    let mut storage = StorageService::with_cache_limits(engine, cache_max_entries, cache_max_bytes);
+    let storage = StorageService::with_cache_limits(engine, cache_max_entries, cache_max_bytes);
 
-    run_server(&address, &mut storage)
+    run_server(&address, storage)
 }
 
 fn read_usize_env(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {

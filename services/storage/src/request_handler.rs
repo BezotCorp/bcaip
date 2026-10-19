@@ -2,7 +2,10 @@ use storage_exchange_format::{
     ExchangeError, StorageOperation, StorageOutcome, StorageRequest, StorageResponse,
 };
 
+use std::error::Error;
+
 use crate::storage_engine::StorageEngine;
+use crate::storage_mutation_error::StorageMutationError;
 use crate::storage_service::StorageService;
 
 pub fn handle_request<E: StorageEngine>(
@@ -31,22 +34,13 @@ fn execute<E: StorageEngine>(
         } => {
             validate(&namespace, &key)?;
 
-            if storage
-                .cached_state(&namespace, &key)
-                .is_some_and(|record| record.is_some())
-            {
-                return Err(ExchangeError::AlreadyExists);
-            }
+            let record = storage
+                .create(&namespace, &key, &content)
+                .map_err(map_error)?;
 
-            match storage.create(&namespace, &key, &content) {
-                Ok(record) => Ok(StorageOutcome::Created {
-                    revision: record.revision,
-                }),
-                Err(_) => match storage.refresh(&namespace, &key) {
-                    Ok(Some(_)) => Err(ExchangeError::AlreadyExists),
-                    Ok(None) | Err(_) => Err(ExchangeError::StorageFailure),
-                },
-            }
+            Ok(StorageOutcome::Created {
+                revision: record.revision,
+            })
         }
 
         StorageOperation::Read { namespace, key } => {
@@ -54,7 +48,7 @@ fn execute<E: StorageEngine>(
 
             let record = storage
                 .read(&namespace, &key)
-                .map_err(|_| ExchangeError::StorageFailure)?
+                .map_err(map_error)?
                 .ok_or(ExchangeError::NotFound)?;
 
             Ok(StorageOutcome::Data {
@@ -70,31 +64,15 @@ fn execute<E: StorageEngine>(
             expected_revision,
         } => {
             validate(&namespace, &key)?;
+            validate_revision(expected_revision)?;
 
-            if expected_revision <= 0 {
-                return Err(ExchangeError::InvalidRequest);
-            }
+            let record = storage
+                .update(&namespace, &key, &content, expected_revision)
+                .map_err(map_error)?;
 
-            if let Some(current) = storage.cached_state(&namespace, &key) {
-                let current = current.ok_or(ExchangeError::NotFound)?;
-
-                if current.revision != expected_revision {
-                    return Err(ExchangeError::RevisionConflict);
-                }
-            }
-
-            match storage.update(&namespace, &key, &content, expected_revision) {
-                Ok(record) => Ok(StorageOutcome::Updated {
-                    revision: record.revision,
-                }),
-                Err(_) => match storage.refresh(&namespace, &key) {
-                    Ok(None) => Err(ExchangeError::NotFound),
-                    Ok(Some(current)) if current.revision != expected_revision => {
-                        Err(ExchangeError::RevisionConflict)
-                    }
-                    Ok(Some(_)) | Err(_) => Err(ExchangeError::StorageFailure),
-                },
-            }
+            Ok(StorageOutcome::Updated {
+                revision: record.revision,
+            })
         }
 
         StorageOperation::Delete {
@@ -103,36 +81,36 @@ fn execute<E: StorageEngine>(
             expected_revision,
         } => {
             validate(&namespace, &key)?;
+            validate_revision(expected_revision)?;
 
-            if expected_revision <= 0 {
-                return Err(ExchangeError::InvalidRequest);
-            }
+            storage
+                .delete(&namespace, &key, expected_revision)
+                .map_err(map_error)?;
 
-            if let Some(current) = storage.cached_state(&namespace, &key) {
-                let current = current.ok_or(ExchangeError::NotFound)?;
-
-                if current.revision != expected_revision {
-                    return Err(ExchangeError::RevisionConflict);
-                }
-            }
-
-            match storage.delete(&namespace, &key, expected_revision) {
-                Ok(true) => Ok(StorageOutcome::Deleted),
-                Ok(false) => match storage.refresh(&namespace, &key) {
-                    Ok(None) => Err(ExchangeError::NotFound),
-                    Ok(Some(current)) if current.revision != expected_revision => {
-                        Err(ExchangeError::RevisionConflict)
-                    }
-                    Ok(Some(_)) | Err(_) => Err(ExchangeError::StorageFailure),
-                },
-                Err(_) => Err(ExchangeError::StorageFailure),
-            }
+            Ok(StorageOutcome::Deleted)
         }
+    }
+}
+
+fn map_error(error: Box<dyn Error>) -> ExchangeError {
+    match error.downcast_ref::<StorageMutationError>() {
+        Some(StorageMutationError::AlreadyExists) => ExchangeError::AlreadyExists,
+        Some(StorageMutationError::NotFound) => ExchangeError::NotFound,
+        Some(StorageMutationError::RevisionConflict) => ExchangeError::RevisionConflict,
+        None => ExchangeError::StorageFailure,
     }
 }
 
 fn validate(namespace: &str, key: &str) -> Result<(), ExchangeError> {
     if namespace.is_empty() || key.is_empty() {
+        return Err(ExchangeError::InvalidRequest);
+    }
+
+    Ok(())
+}
+
+fn validate_revision(revision: i64) -> Result<(), ExchangeError> {
+    if revision <= 0 {
         return Err(ExchangeError::InvalidRequest);
     }
 

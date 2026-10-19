@@ -63,7 +63,10 @@ impl<E: StorageEngine> StorageService<E> {
         key: &str,
         content: &[u8],
     ) -> StorageResult<DataRecord> {
-        let record = self.engine.write(namespace, key, content, None)?;
+        let record = self
+            .engine
+            .write(namespace, key, content, None)
+            .inspect_err(|_| self.remove_cached(&(namespace.to_owned(), key.to_owned())))?;
 
         self.cache((namespace.to_owned(), key.to_owned()), Some(record.clone()));
 
@@ -77,7 +80,10 @@ impl<E: StorageEngine> StorageService<E> {
         content: &[u8],
         revision: i64,
     ) -> StorageResult<DataRecord> {
-        let record = self.engine.write(namespace, key, content, Some(revision))?;
+        let record = self
+            .engine
+            .write(namespace, key, content, Some(revision))
+            .inspect_err(|_| self.remove_cached(&(namespace.to_owned(), key.to_owned())))?;
 
         self.cache((namespace.to_owned(), key.to_owned()), Some(record.clone()));
 
@@ -85,7 +91,10 @@ impl<E: StorageEngine> StorageService<E> {
     }
 
     pub fn delete(&mut self, namespace: &str, key: &str, revision: i64) -> StorageResult<bool> {
-        let deleted = self.engine.delete(namespace, key, revision)?;
+        let deleted = self
+            .engine
+            .delete(namespace, key, revision)
+            .inspect_err(|_| self.remove_cached(&(namespace.to_owned(), key.to_owned())))?;
 
         if deleted {
             self.cache((namespace.to_owned(), key.to_owned()), None);

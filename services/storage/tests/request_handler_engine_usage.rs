@@ -17,9 +17,7 @@ mod storage_service;
 use data_record::DataRecord;
 use request_handler::handle_request;
 use storage_engine::{StorageEngine, StorageResult};
-use storage_exchange_format::{
-    ExchangeError, StorageOperation, StorageOutcome, StorageRequest,
-};
+use storage_exchange_format::{ExchangeError, StorageOperation, StorageOutcome, StorageRequest};
 use storage_service::StorageService;
 
 #[derive(Default)]
