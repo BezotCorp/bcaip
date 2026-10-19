@@ -1,0 +1,9 @@
+[package]
+name = "local_bcaip_environment_preparer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+executables_manager = { version = "0.1.0", path = "../../libraries/executables_manager" }
+files_manager = { version = "0.1.0", path = "../../libraries/files_manager" }
+launch_ecosystem = { version = "0.1.0", path = "../../libraries/launch_ecosystem" }

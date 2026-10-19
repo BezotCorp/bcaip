@@ -6,9 +6,23 @@ members = [
     "products/vscode_extension",
     "services/hub",
     "services/storage",
-    "services/launcher",
+    "services/supervisor",
+    "services/deploy_bcaip_to_server",
+    "services/local_bcaip_environment_preparer",
     "libraries/app_engine_exchange_format",
     "libraries/app_ui_exchange_format",
     "libraries/vscode_extension_exchange_format",
     "libraries/storage_exchange_format",
+    "libraries/executables_manager",
+    "libraries/servers_manager",
+    "libraries/launch_ecosystem",
+    "libraries/files_manager",
+    "libraries/ws_manager",
 ]
+
+[workspace.dependencies]
+bincode-next = "3.1.1"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.1"
+uuid = { version = "1.28.0", features = ["v7"] }
